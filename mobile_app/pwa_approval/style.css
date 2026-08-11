@@ -1,0 +1,483 @@
+/* =====================================================================
+   HH Agent 承認 PWA - スタイル
+   06_PWA_Design.md v1 / 05_Phase1a_Spec.md §9 に従う。
+   - ダーク既定 (夜間の通知)
+   - 信号機型: 背景 = リスク色、ただしアイコン + ラベル併記で色だけに依存しない
+   - 承認ボタン = 枠線のみ (塗りなし) で押しにくくする
+   - 却下ボタン = 塗りつぶしで押しやすく
+   - 点滅・明滅なし (光過敏性発作対策)
+   - 外部リソース一切なし (Web フォント禁止・CDN 禁止)
+   ===================================================================== */
+
+:root {
+  /* 危険度 (ダーク既定) */
+  --risk-high-bg:    #4a0f14;
+  --risk-high-fg:    #ffd9dc;
+  --risk-high-edge:  #e5484d;
+
+  --risk-med-bg:     #402a05;
+  --risk-med-fg:     #ffe8bd;
+  --risk-med-edge:   #f5a524;
+
+  --risk-low-bg:     #0d2f1d;
+  --risk-low-fg:     #c8f2d8;
+  --risk-low-edge:   #30a46c;
+
+  /* 中立面 (詳細・一覧・ペアリング・状態) */
+  --surface:         #101114;
+  --surface-raised:  #1a1c21;
+  --text:            #ecedee;
+  --text-dim:        #9ba1a6;
+  --edge:            #2a2d33;
+
+  /* 操作 */
+  --deny-bg:         #ecedee;   /* 却下 = 安全側 */
+  --deny-fg:         #101114;
+  --approve-edge:    #ecedee;   /* 承認 = 危険側。枠線のみ */
+  --approve-progress: #30a46c;  /* 長押しプログレス (LOW 寄りの中立グリーン) */
+
+  /* レイアウト */
+  --gap:    16px;
+  --gap-l:  24px;
+  --radius: 12px;
+  --tap:    56px;   /* ボタン最小高さ */
+}
+
+/* ライトモードは prefers-color-scheme で上書き */
+@media (prefers-color-scheme: light) {
+  :root {
+    --surface:        #f7f7f8;
+    --surface-raised: #ffffff;
+    --text:           #14161a;
+    --text-dim:       #5b6168;
+    --edge:           #d8dade;
+
+    --deny-bg:        #14161a;
+    --deny-fg:        #ffffff;
+    --approve-edge:   #14161a;
+
+    /* リスク面はダーク時のほうが見やすいので彩度を落とし気味に維持 */
+    --risk-high-bg:    #fdecee;
+    --risk-high-fg:    #4a0f14;
+    --risk-high-edge:  #c0272b;
+
+    --risk-med-bg:     #fdf2db;
+    --risk-med-fg:     #402a05;
+    --risk-med-edge:   #b97000;
+
+    --risk-low-bg:     #e6f6ec;
+    --risk-low-fg:     #0d2f1d;
+    --risk-low-edge:   #1f7a4d;
+  }
+}
+
+/* フォントはシステムフォントスタックのみ。Web フォント禁止。 */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+               "Yu Gothic UI", "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+  color-scheme: dark light;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--surface);
+  color: var(--text);
+  /* safe-area を尊重 (ノッチ・ホームインジケータ) */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.root {
+  display: block;
+  min-height: 100%;
+}
+
+/* ============== view (画面の基底) ============== */
+
+.view {
+  display: block;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.view-neutral {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.view-risk {
+  /* リスク色背景。--risk-bg は JS で差し替える */
+  color: var(--text);
+}
+
+.container {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--gap-l) var(--gap);
+  /* 下端の誤タップ防止: 24px 以上の余白 */
+  padding-bottom: calc(env(safe-area-inset-bottom) + 32px);
+}
+
+/* ============== 承認画面 ============== */
+
+.risk-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gap);
+  margin-bottom: var(--gap-l);
+}
+
+.risk-icon {
+  font-size: 2.5rem;
+  line-height: 1;
+  font-weight: 700;
+  min-width: 2.5rem;
+  text-align: center;
+}
+
+.risk-label {
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.tool-name {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: var(--gap);
+  opacity: 0.9;
+}
+
+.summary {
+  /* summary はサーバ側で redaction 済み。先頭 200 字。 */
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "Menlo",
+               "Consolas", monospace;
+  font-size: 1.1rem;
+  line-height: 1.45;
+  background: rgba(0, 0, 0, 0.25);
+  padding: var(--gap);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 var(--gap) 0;
+  /* 折り返し。横スクロールさせない */
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: var(--gap-l);
+  font-size: 0.95rem;
+}
+
+.meta-line {
+  opacity: 0.85;
+}
+
+/* カウントダウン */
+.countdown-block {
+  margin-bottom: var(--gap-l);
+}
+
+.countdown-label {
+  font-size: 0.9rem;
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.countdown-bar {
+  height: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.countdown-bar-fill {
+  height: 100%;
+  width: 100%;
+  background: currentColor;
+  /* バー減少時の遷移 (点滅ではない、width の変化のみ) */
+  transition: width 0.5s linear;
+  opacity: 0.7;
+}
+
+/* ============== ボタン ============== */
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap);
+  min-height: var(--tap);    /* 56px 以上 */
+  padding: 12px var(--gap-l);
+  border-radius: var(--radius);
+  font: inherit;
+  font-weight: 700;
+  font-size: 1.1rem;
+  border: 2px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  /* トランジションは色のみ (点滅なし) */
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-deny {
+  background: var(--deny-bg);
+  color: var(--deny-fg);
+  border-color: var(--deny-bg);
+  /* 却下 = 押しやすい (上に配置) */
+}
+
+.btn-approve {
+  /* 承認 = 押しにくく。塗りなし、枠線のみ */
+  background: transparent;
+  color: var(--text);
+  border-color: var(--approve-edge);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-approve .approve-progress {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: var(--approve-progress);
+  opacity: 0.35;
+  transition: width 0.05s linear;
+  pointer-events: none;
+}
+
+.btn-approve.pressing .approve-progress {
+  /* JS が width を 0 -> 100% へ進める */
+}
+
+.btn-approve.completed .approve-progress {
+  background: var(--approve-edge);
+  opacity: 0.6;
+}
+
+/* フォーム要素 */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.input {
+  font: inherit;
+  min-height: var(--tap);
+  padding: 12px var(--gap);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--edge);
+}
+
+.input:focus {
+  outline: 2px solid var(--text-dim);
+  outline-offset: 2px;
+}
+
+.input-code {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 1.5rem;
+  letter-spacing: 0.5em;
+  text-align: center;
+}
+
+.error {
+  color: var(--risk-high-edge);
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+/* リンク */
+.link-detail, .link-back {
+  display: inline-block;
+  padding: 12px 0;
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font-weight: 600;
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+}
+
+.link-back {
+  margin-top: var(--gap);
+}
+
+.divider {
+  border: 0;
+  border-top: 1px solid currentColor;
+  opacity: 0.25;
+  margin: var(--gap-l) 0;
+}
+
+/* キュー (他 N 件) */
+.queue-label {
+  font-size: 0.9rem;
+  opacity: 0.75;
+  margin-bottom: 8px;
+}
+
+.queue-list, .big-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-row, .big-list > li {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  background: var(--surface-raised);
+  border-radius: var(--radius);
+  padding: 12px var(--gap);
+  border-left: 6px solid var(--text-dim);
+  min-height: var(--tap);
+  cursor: pointer;
+}
+
+.queue-row .tool, .big-list > li .tool {
+  font-weight: 700;
+}
+
+.queue-row .remaining, .big-list > li .remaining {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* 一覧画面タイトル */
+.title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 var(--gap) 0;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+
+.hint code {
+  background: var(--surface-raised);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+}
+
+/* 詳細画面 */
+.detail-edge {
+  height: 4px;
+  background: var(--text-dim);
+  margin-bottom: var(--gap);
+}
+
+.detail-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 0 0 var(--gap) 0;
+}
+
+.detail-block {
+  margin-bottom: var(--gap);
+}
+
+.detail-label {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+
+.detail-payload, .detail-paths, .detail-cwd {
+  background: var(--surface-raised);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 0.95rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.detail-diff > div {
+  padding: 2px 8px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  white-space: pre-wrap;
+}
+
+.detail-diff .diff-add { background: rgba(48, 164, 108, 0.18); }
+.detail-diff .diff-del { background: rgba(229, 72, 77, 0.18); text-decoration: line-through; }
+.detail-diff .diff-hunk { opacity: 0.6; }
+
+/* 状態画面 */
+.status-message {
+  color: var(--text-dim);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+/* フォーカス可読性 */
+:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* ユーザが「動きを減らす」を選んだときは transition を切る */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}

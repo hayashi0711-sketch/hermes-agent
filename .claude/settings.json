@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/Users/Haruki/Projects/Hermes-Hyper-Agent_HHAgent/hh_hooks/tool_gate.py\"",
+            "timeout": 200
+          }
+        ]
+      }
+    ]
+  }
+}

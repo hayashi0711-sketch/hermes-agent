@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#101114">
+<title>HH 承認</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main id="root" class="root" aria-live="polite">
+
+  <!-- 全画面の土台。app.js がここに要素を差し込む。
+       textContent と createElement のみを使う (innerHTML 禁止)。 -->
+
+  <!-- ペアリング画面 (初回のみ) -->
+  <section id="view-pairing" class="view view-neutral" hidden>
+    <div class="container">
+      <h1 class="title">ペアリング</h1>
+      <p class="hint">PC の <code>hh pwa pair</code> で表示される 8 桁コードを入力してください。</p>
+
+      <form id="pair-form" class="form" autocomplete="off">
+        <label class="field">
+          <span class="field-label">コード</span>
+          <input id="pair-code" name="code"
+                 inputmode="numeric" maxlength="8"
+                 autocomplete="one-time-code"
+                 class="input input-code" required>
+        </label>
+
+        <label class="field">
+          <span class="field-label">端末名</span>
+          <input id="pair-device" name="device_name"
+                 maxlength="40" class="input" required>
+        </label>
+
+        <button id="pair-submit" type="submit" class="btn btn-deny">
+          ペアリング
+        </button>
+        <p id="pair-error" class="error" role="alert" hidden></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- 承認画面 (主画面・1 件全画面) -->
+  <section id="view-approval" class="view view-risk" hidden>
+    <div class="container">
+
+      <header class="risk-header">
+        <div class="risk-icon" id="risk-icon" aria-hidden="true"></div>
+        <div class="risk-label" id="risk-label"></div>
+      </header>
+
+      <div class="tool-name" id="tool-name"></div>
+
+      <pre class="summary" id="summary"></pre>
+
+      <div class="meta">
+        <div class="meta-line" id="workspace"></div>
+        <div class="meta-line" id="rule-line"></div>
+      </div>
+
+      <div class="countdown-block">
+        <div class="countdown-label">残り</div>
+        <div class="countdown" id="countdown">--:--</div>
+        <div class="countdown-bar" id="countdown-bar"
+             role="progressbar" aria-label="猶予の残り時間"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+          <div class="countdown-bar-fill" id="countdown-bar-fill"></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-deny" type="button" class="btn btn-deny" disabled>
+          却下する
+        </button>
+        <button id="btn-approve" type="button" class="btn btn-approve" disabled
+                aria-label="800ms 長押しで承認">
+          <span class="approve-label">長押しで承認</span>
+          <span class="approve-progress" id="approve-progress" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <a href="#detail" class="link-detail" id="link-detail">全文と差分を見る ›</a>
+
+      <hr class="divider">
+
+      <div class="queue" id="queue" hidden>
+        <div class="queue-label" id="queue-label">他に 0 件</div>
+        <ol class="queue-list" id="queue-list"></ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- 詳細画面 -->
+  <section id="view-detail" class="view view-neutral" hidden>
+    <div class="container">
+      <div class="detail-edge" id="detail-edge" aria-hidden="true"></div>
+
+      <h2 class="detail-title" id="detail-title"></h2>
+
+      <section class="detail-block">
+        <div class="detail-label">コマンド全文</div>
+        <pre class="detail-payload" id="detail-payload"></pre>
+      </section>
+
+      <section class="detail-block">
+        <div class="detail-label">対象パス</div>
+        <pre class="detail-paths" id="detail-paths"></pre>
+      </section>
+
+      <section class="detail-block">
+        <div class="detail-label">cwd / HEAD</div>
+        <pre class="detail-cwd" id="detail-cwd"></pre>
+      </section>
+
+      <section class="detail-block" id="detail-diff-block" hidden>
+        <div class="detail-label">差分</div>
+        <div class="detail-diff" id="detail-diff"></div>
+      </section>
+
+      <div class="actions">
+        <button id="btn-detail-deny" type="button" class="btn btn-deny">却下する</button>
+        <button id="btn-detail-approve" type="button" class="btn btn-approve"
+                aria-label="800ms 長押しで承認">
+          <span class="approve-label">長押しで承認</span>
+          <span class="approve-progress" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <a href="#back" class="link-back" id="link-back">‹ 戻る</a>
+    </div>
+  </section>
+
+  <!-- 一覧画面 (2 件以上ある時) -->
+  <section id="view-list" class="view view-neutral" hidden>
+    <div class="container">
+      <h1 class="title">承認待ち一覧</h1>
+      <ol class="big-list" id="big-list"></ol>
+      <p class="hint" id="list-empty" hidden>承認待ちはありません</p>
+    </div>
+  </section>
+
+  <!-- 状態画面 -->
+  <section id="view-status" class="view view-neutral" hidden>
+    <div class="container">
+      <h1 class="title" id="status-title">読み込み中…</h1>
+      <p class="status-message" id="status-message"></p>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
