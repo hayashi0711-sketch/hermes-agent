@@ -20,6 +20,9 @@ from pathlib import Path
 
 import pytest
 
+from modal_hub.routers import approval_gate as gate
+from modal_hub.tests.conftest import FakeStore
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -606,3 +609,58 @@ def test_no_secret_material_is_committed(base: str) -> None:
         text = path.read_text(encoding="utf-8", errors="replace")
         for pattern in patterns:
             assert not re.search(pattern, text), f"{path} に秘密らしき値がある"
+
+
+# ===========================================================================
+# M13回帰: _index_add / _index_remove の同時書き込み競合
+# ===========================================================================
+
+
+def test_index_add_survives_interleaved_writer():
+    """M13回帰: Aの1回目の読み取りとAの書き込みの間にBが完全な追加サイクルを
+    割り込ませて完了させても、最終的にAとBの両方がインデックスに残ること
+    （修正前は後勝ちのAがBの追加を静かに消していた）。
+    """
+    s = FakeStore()
+    key = "pending:index"
+    original_get = s.get
+    triggered = {"done": False}
+
+    def get_with_interference(k):
+        value = original_get(k)
+        if k == key and not triggered["done"]:
+            triggered["done"] = True
+            gate._index_add(s, key, "item-B")
+        return value
+
+    s.get = get_with_interference
+    gate._index_add(s, key, "item-A")
+
+    result = s.get(key)
+    assert "item-A" in result
+    assert "item-B" in result
+
+
+def test_index_remove_survives_interleaved_writer():
+    """M13回帰（削除版）: Aがitem-Xを削除しようとしている最中にBが別の
+    item-Yを削除する競合が起きても、両方とも正しく削除されること。
+    """
+    s = FakeStore()
+    key = "pending:index"
+    s.data[key] = ["item-X", "item-Y"]
+    original_get = s.get
+    triggered = {"done": False}
+
+    def get_with_interference(k):
+        value = original_get(k)
+        if k == key and not triggered["done"]:
+            triggered["done"] = True
+            gate._index_remove(s, key, "item-Y")
+        return value
+
+    s.get = get_with_interference
+    gate._index_remove(s, key, "item-X")
+
+    result = s.get(key)
+    assert "item-X" not in result
+    assert "item-Y" not in result

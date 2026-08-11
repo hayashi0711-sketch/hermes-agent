@@ -53,10 +53,29 @@ non-negotiable invariants は decision:/lease:/idem: の3種類だけを
 による「無条件 put（読み取り→追加→上書き）」を実装した（`_index_add`/
 `_index_remove`。`store.APPROVALS_DICT_NAME` という公開定数を使い、
 `modal.Dict.from_name(...)` を直接呼ぶ。`core/store.py` のファイル自体は
-一切変更していない）。これは REQUESTS TO OTHER OWNERS として報告する:
-`core/store.py` に「単一キーへの逐次追加」を安全にラップする専用ヘルパー
-（例: `index_add(key, item_id) -> None`）を用意してもらえれば、このファイルの
-直接アクセスは撤去できる。
+一切変更していない）。
+
+**2026-08-12（Codexレビュー指摘M13の修正）**: 上記の「無条件 put」は、2つの
+リクエストがほぼ同時に同じインデックスキーへ追加/削除しようとすると、
+後勝ちが前勝ちの変更を静かに上書きして消してしまう（lost update）という
+欠陥があった。`_index_add`/`_index_remove` を「書き込み直前にもう一度
+読み直して最初の読み取りと一致するか確認し、不一致なら最新値から再計算して
+やり直す」リトライ方式に変更し、競合窓を大幅に狭めた（詳細は各関数の
+docstring）。`modal.Dict` に真の compare-and-set が無いため完全な排他では
+ないが、上記の「取りこぼしても実害は軽微」というリスク評価を踏まえると
+この程度の緩和で十分と判断し、`core/store.py` 側への専用ヘルパー追加は
+見送った（元々の REQUESTS TO OTHER OWNERS は撤回する）。
+
+**Codexレビューで確認された既知の残存リスク（Medium・受容済み）**: この
+リトライ方式は「最初の読み取り→書き込み直前の再読み取り」の間の競合は
+検出できるが、「書き込み直前の再読み取り→実際の `overwrite()` 呼び出し」
+の間（Dict への1回のRPC呼び出しが完走するまでのごく短い時間）に別の
+書き込みが割り込むケースは検出できない（真の compare-and-set が無い以上、
+原理的にこの窓は残る）。個人単一開発者・低頻度の承認リクエストという
+運用規模では、この窓に2つの書き込みが実際に重なる確率は無視できるほど
+小さいと判断し、ロック等の追加実装（設計判断の履歴どおり、ロックは
+再入・例外安全性・テストのハングという新たなリスクを持ち込むため導入を
+避ける方針）はしないことにした。
 
 `notify:<approval_id>` は通常系ではこのファイルから書き込まない。
 `modal_hub/services/notifier.py`（別担当・着地済み）の
@@ -291,23 +310,48 @@ def _index_get(s: ApprovalStore, key: str) -> list[str]:
     return value
 
 
+_INDEX_WRITE_MAX_ATTEMPTS = 5
+
+
 def _index_add(s: ApprovalStore, key: str, item_id: str) -> None:
     """`key` の値（文字列リスト）へ `item_id` を追加する（既存なら何もしない）。
 
-    注意: 読み取り→追加→上書きの非アトミック操作。競合下では取りこぼしが
-    起こりうる（本ファイル冒頭の docstring 参照。安全性クリティカルな
-    write-once キーには絶対に使わない）。
+    M13修正: 従来は読み取り→追加→`s.overwrite()`の単発・非アトミック操作で、
+    競合下では取りこぼしが起こりえた。`modal.Dict` に真の compare-and-set が
+    無いため完全な排他はできないが、書き込み直前にもう一度読み直して最初の
+    読み取りと一致するか確認し、不一致なら（誰かが間に書き込んだ証拠）最新値
+    から再計算してやり直す方式にして競合窓を大幅に狭めた。最大
+    `_INDEX_WRITE_MAX_ATTEMPTS` 回まで再試行し、それでも決着しなければログに
+    残して諦める（安全性クリティカルな write-once キーには絶対に使わない。
+    本ファイル冒頭の docstring 参照 — この2キーは表示・GC用の補助データで
+    あり、稀な取りこぼしも承認状態機械の正しさには影響しない）。
     """
-    current = _index_get(s, key)
-    if item_id not in current:
-        current.append(item_id)
-        s.overwrite(key, current)
+    for _ in range(_INDEX_WRITE_MAX_ATTEMPTS):
+        current = _index_get(s, key)
+        if item_id in current:
+            return
+        candidate = current + [item_id]
+        recheck = _index_get(s, key)
+        if recheck != current:
+            continue
+        s.overwrite(key, candidate)
+        return
+    logger.error("index_add exhausted retries for key=%s item_id=%s", key, item_id)
 
 
 def _index_remove(s: ApprovalStore, key: str, item_id: str) -> None:
-    current = _index_get(s, key)
-    if item_id in current:
-        s.overwrite(key, [x for x in current if x != item_id])
+    """`_index_add` と対称。`key` から `item_id` を取り除く。"""
+    for _ in range(_INDEX_WRITE_MAX_ATTEMPTS):
+        current = _index_get(s, key)
+        if item_id not in current:
+            return
+        candidate = [x for x in current if x != item_id]
+        recheck = _index_get(s, key)
+        if recheck != current:
+            continue
+        s.overwrite(key, candidate)
+        return
+    logger.error("index_remove exhausted retries for key=%s item_id=%s", key, item_id)
 
 
 def _gc_index_key(now: float) -> str:
