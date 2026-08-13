@@ -1,0 +1,64 @@
+# Phase 1c dashboard image -- Hermes `dashboard` (FastAPI + /api/pty
+# PTY-over-WS chat) on Modal. Trimmed from the production Dockerfile
+# (repo root): dropped s6-overlay process supervision, the custom
+# SQLite build, Playwright/Chromium, the Matrix (python-olm) build
+# toolchain, the Photon sidecar, and the messaging/hindsight/bedrock/
+# azure-identity extras. Single ASGI process only -- Modal owns the
+# container lifecycle (docs/hh-agent/08_Phase1c_Spec.md §4).
+#
+# Node is pinned to 22, NOT the production Dockerfile's 26. This is an
+# intentional mismatch (spec §4.3) -- do not "fix" it without reading
+# that section first.
+
+FROM node:22-bookworm-slim AS node_source
+
+FROM python:3.13-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get -o Acquire::Retries=3 update && \
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+    ca-certificates curl git procps && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=node_source /usr/local/bin/node /usr/local/bin/
+COPY --from=node_source /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+RUN pip install --no-cache-dir uv==0.11.6
+
+WORKDIR /opt/hermes
+
+# ---------- Layer-cached npm installs ----------
+COPY package.json package-lock.json ./
+COPY web/package.json web/
+COPY ui-tui/package.json ui-tui/
+COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
+COPY apps/shared/ apps/shared/
+ENV npm_config_install_links=false
+RUN npm install --prefer-offline --no-audit --fetch-retries=5 && npm cache clean --force
+
+# ---------- Layer-cached Python deps (web + anthropic only) ----------
+COPY pyproject.toml uv.lock ./
+RUN touch ./README.md
+RUN uv sync --frozen --no-install-project --extra web --extra anthropic --extra pty
+
+# ---------- Frontend build ----------
+COPY web/ web/
+COPY ui-tui/ ui-tui/
+COPY apps/shared/ apps/shared/
+RUN cd web && npm run build && cd ../ui-tui && npm run build
+
+# ---------- Source ----------
+COPY . .
+RUN uv pip install --no-cache-dir --no-deps -e "."
+
+ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
+ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
+ENV HERMES_HOME=/opt/data
+ENV HOME=/opt/data
+ENV HERMES_DISABLE_LAZY_INSTALLS=1
+ENV PATH="/opt/hermes/.venv/bin:${PATH}"
+RUN mkdir -p /opt/data
