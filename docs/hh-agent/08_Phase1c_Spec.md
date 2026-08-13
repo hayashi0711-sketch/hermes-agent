@@ -1,6 +1,6 @@
 # H-H Agent Phase 1c 詳細仕様（実装契約）
 
-- **最終更新**: 2026-08-13
+- **最終更新**: 2026-08-13（同日、Codex全体レビューでC-1/C-2/C-3を検出→§2.2/§2.3をアーキテクチャごと訂正）
 - **親設計書**: `docs/hh-agent/03_Architecture.md`（食い違う場合は親設計書が優先。本書は §4.6 の PoC 合否条件を満たした後の実装契約として、§4.6 の一部を本書の内容で更新する。詳細は「§0 親設計書からの変更点」参照）
 - **位置づけ**: 親設計書 §4.6「Phase 1c 着手前に必須」の PoC①②を実機で通過させたうえで、本実装に必要な設計判断（HERMES_HOME 永続化・認証・承認ゲート統合・Node 版数・リポジトリ構成）を確定させたもの。**ここに書かれていることは実装者が変更してよい判断ではない。** 不足を見つけたら BLOCKED として報告すること。
 
@@ -18,6 +18,23 @@ PoC は 2026-08-13 に実機で実施し、両方とも通過した:
 - **「1 セッション = 1 Modal Sandbox」方式を撤回**し、**`max_containers=1` による単一コンテナ固定**に置き換える（§2.2）。理由: セッション状態がプロセス内 dict で保持される制約自体は親設計書の指摘どおり正しいが、それが問題になるのは「複数コンテナ間でセッションを正しくルーティングする必要がある」場合に限る。本プロジェクトは個人単一ユーザー運用で同時アクセスは実質 1 系統のため、**コンテナを常に 1 個に固定すれば、そもそも複数コンテナ間のルーティング問題自体が発生しない**。Sandbox 生成・URL/WS プロキシ・再接続・Sandbox 単位認証・スケールダウン復旧という 5 項目の設計を丸ごと不要にできる。
 - PoC 合否条件の記述に残っていた `serve` バックエンドという表現は誤り（親設計書内で「`serve` は使えない、`dashboard` を丸ごとホストする」という決定と矛盾していた）。本書では一貫して `dashboard`（`hermes_cli.web_server:app`）を対象とする。
 - 親設計書が要求する「承認の合流」（`pre_tool_call` フック必須・`env_type="modal"` 禁止・D-14「最重要」）は**そのまま維持し、本書 §3 で具体化する**。変更なし。
+
+## 0.1 実装後のアーキテクチャ訂正（2026-08-13・同日、実デプロイ＋Codex全体レビューで発覚）
+
+5タスク実装・タスク別レビュー通過・実デプロイまで完了した直後、**Codexの全体横断レビューでCritical指摘3件（C-1〜C-3）が見つかり、§2.2「アーキテクチャ」・§2.3「ダッシュボードアクセス認証」の設計そのものが誤っていたと判明した。**
+
+**誤っていた前提**: `hermes_cli.web_server:app` を `@modal.asgi_app()` でそのまま返せば `hermes dashboard` と等価に動くと想定していたが、実際には `hermes_cli.web_server.start_server()` が行っている以下の配線が**まるごとスキップされる**ことが分かった:
+
+- `app.state.bound_host`/`app.state.bound_port` の設定 → `/api/pty` がこの値を使って「同一プロセス内のゲートウェイ」に接続する URL を組み立てる。値が無いと、Node 製 TUI は**別プロセス**（`python -m tui_gateway.entry`）を新規起動する。**このプロセスは `agent.shell_hooks.register_from_config()` を一度も呼ばず、承認ゲートのフックが 0 件のまま危険コマンドを実行できてしまう**（C-1。ASGI プロセス側の起動時チェックは通っていたのに、実際にツールを実行する場所には承認ゲートが無かった）
+- `app.state.auth_required` の設定 → 未設定だとループバック向けの既定動作のままとなり、SPA が未認証の `GET /` にセッショントークンを埋め込んで配信してしまう（C-2）
+
+**訂正した設計**: `hermes_cli.web_server.start_server()` の配線を自前で再現するのではなく、**実際に `hermes dashboard` CLI をサブプロセスとして起動する**方式に変更した。`@modal.asgi_app()` → `@modal.web_server(port=8000)` に切り替え、コンテナ内で `python /opt/hermes/hh_hermes.py dashboard --host 0.0.0.0 --port 8000 --no-open --skip-build` を起動する。
+
+- `hh_hermes.py`（Phase1a・C5 で新設済みの起動ラッパー）を経由するため、**承認ゲートのフック検証（D-14）が、実際にツールを実行するプロセスの中で行われる**（C-1 の根本修正）
+- `--host 0.0.0.0` を渡すことで、Hermes 自身の `should_require_auth()` がこれを「公開バインド」と正しく認識し、`app.state.auth_required=True` を自動設定。**認証プロバイダ未登録なら Hermes 自身が起動を拒否する**（フェイルクローズ）。プロバイダは Hermes 標準搭載の `basic`（ユーザー名・パスワード）を `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`/`_PASSWORD`（Modal Secret 経由の環境変数）で有効化する。**独自の固定トークン方式（`HERMES_DASHBOARD_SESSION_TOKEN`・`?token=`URL）は廃止した**（C-2 の根本修正。旧方式はそもそも `start_server()` を経由しないと機能していなかった）
+- `hh-agent-secret`（Hub 署名鍵 `HH_AGENT_TOKEN_SIGNING_KEY` を含む）は、ダッシュボードを配信し信頼できないエージェントコマンドを実行するこの関数には**一切アタッチしない**。トークンの初回シーディングは、署名鍵を持つ `refresh_dashboard_agent_token` 関数を `.remote()` で呼び出す方式に変更した（C-3 の根本修正）
+
+§2.2 のコード例・§2.3 の認証方式の記述は、以下の内容で読み替えること（本文はもう更新しない。実装済みコード `modal_dashboard/app.py` が正）。実機で C-1（ログ `[HH-AGENT] startup guard: ... OK.` が実行プロセス内で出力されることを確認）・C-2（未認証 `GET /` → `302 /login`、ログイン後のみ `200`）とも動作確認済み。
 
 ---
 
@@ -52,7 +69,10 @@ PoC は 2026-08-13 に実機で実施し、両方とも通過した:
 
 ### 2.2 コンテナ同時実行数: `max_containers=1`
 
+> **⚠️ このコード例は 2026-08-13 のCodexレビューで置き換え済み（§0.1参照）。** `@modal.asgi_app()` で `web_server.app` を直接返す方式は、`start_server()` の配線（`bound_host`/`bound_port`/`auth_required`）を丸ごとスキップし C-1・C-2 の原因になった。実装済みの正しいコードは `modal_dashboard/app.py`（`@modal.web_server(port=8000)` + `hh_hermes.py dashboard --host 0.0.0.0` サブプロセス方式）を参照。`max_containers=1` の必要性・理由は変更なし。
+
 ```python
+# 旧コード例（訂正済み・参考用。実装は modal_dashboard/app.py 参照）
 @app.function(
     image=image,
     volumes={"/opt/data": modal.Volume.from_name("hh-agent-dashboard-home", create_if_missing=True)},
@@ -76,10 +96,14 @@ def fastapi_app():
 
 ### 2.3 ダッシュボードアクセス認証
 
-Hermes 本体の `_SESSION_TOKEN` 機構をそのまま使う。H-H-Agent の scope トークンモデル（`issue_agent_token`/`require_scope`）とは**二重化しない**（脅威モデルが異なるため。Phase1a はローカルの危険コマンドをスマホ承認する仕組み、Phase1c はクラウド Hermes 自体へのアクセス制御）。
+> **⚠️ 2026-08-13訂正（§0.1参照）。** 独自の固定トークン（`HERMES_DASHBOARD_SESSION_TOKEN`・`?token=`URL）方式は**廃止**した。この方式は `start_server()` を経由しないと機能せず（`_resolve_session_token()` が実際に参照されるのは旧 `@modal.asgi_app()` パスのみ）、C-2（未認証アクセスでのトークン漏洩）の原因になった。
 
-- `HERMES_DASHBOARD_SESSION_TOKEN` を Modal Secret として固定発行する（`secrets.token_urlsafe(32)` 相当を一度だけ生成し、以後変更しない）。**コールドスタートのたびにランダム再生成させない**（`web_server.py` の `_resolve_session_token()` は環境変数があればそれを優先するため、Secret を注入するだけで済む）
-- アクセス URL は `https://<modal-url>/?token=<固定トークン>`
+Hermes 標準搭載の `dashboard_auth` フレームワークをそのまま使う。H-H-Agent の scope トークンモデル（`issue_agent_token`/`require_scope`）とは**二重化しない**（脅威モデルが異なるため。Phase1a はローカルの危険コマンドをスマホ承認する仕組み、Phase1c はクラウド Hermes 自体へのアクセス制御）。
+
+- 認証プロバイダは Hermes 標準搭載の `basic`（ユーザー名・パスワード、`plugins/dashboard_auth/basic/`）を使う。`HERMES_DASHBOARD_BASIC_AUTH_USERNAME`/`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`（Modal Secret `hh-agent-dashboard-secret` 経由の環境変数）で有効化される
+- `hermes dashboard --host 0.0.0.0 ...` を渡すことで、Hermes 自身の `should_require_auth()` が公開バインドと正しく認識し `app.state.auth_required=True` を自動設定。**認証プロバイダが登録されていなければ Hermes 自身が起動を拒否する**（`start_server()` 自体のフェイルクローズ設計をそのまま享受できる）
+- セッションは HttpOnly Cookie（`hermes_session_at`/`hermes_session_rt`）。JS からは読めず、URL にも残らない
+- アクセス URL は `https://<modal-url>/`（未認証だと `/login` へリダイレクト）。ログインは `POST /auth/password-login`（body: `{"provider":"basic","username":...,"password":...}`）
 
 ---
 
