@@ -61,4 +61,9 @@ ENV HERMES_HOME=/opt/data
 ENV HOME=/opt/data
 ENV HERMES_DISABLE_LAZY_INSTALLS=1
 ENV PATH="/opt/hermes/.venv/bin:${PATH}"
-RUN mkdir -p /opt/data
+# Do NOT `mkdir -p /opt/data` here: Modal mounts the hh-agent-dashboard-home
+# Volume at this exact path, and refuses to mount onto a path that already
+# has a filesystem entry baked into the image ("cannot mount volume on
+# non-empty path"). Discovered via a real deploy failure (all containers
+# crash-looped with that exact error) -- Modal creates the mount point
+# itself, so this directory must not exist in the image at all.
