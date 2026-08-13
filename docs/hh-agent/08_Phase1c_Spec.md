@@ -70,7 +70,7 @@ def fastapi_app():
     return web_server.app
 ```
 
-**`HOME=/opt/data` を Dockerfile / Modal Function の環境変数として明示的に設定する**（Dockerfile.phase1c の `ENV HERMES_HOME=/opt/data` と同じ値）。`hh_hooks/tool_gate.py` の `_hh_agent_home()` は `USERPROFILE` が無ければ `Path.home()` にフォールバックするため、`HOME` を明示しないと Linux コンテナでは既定で `/root`（Volume 外＝コンテナ再作成のたびに消える一時領域）に解決されてしまう。`HOME=/opt/data` を設定することで `~/.hh-agent/` = `/opt/data/.hh-agent/` となり、Volume 上に永続化され、§3.4 のトークン自動更新関数とも同じパスを共有できる（両関数とも同じ Volume を `/opt/data` にマウントするため）。
+**`USERPROFILE=/opt/data` を Dockerfile / Modal Function の環境変数として明示的に設定する**（2026-08-13 実デプロイで訂正。当初は `HOME=/opt/data` を指定する設計だったが、実際にデプロイしたところ全コンテナが `cannot mount volume on non-empty path: "/opt/data"` でクラッシュループした。原因は `HOME=/opt/data` を設定すると、コンテナ起動直後に Python/uv 等のツールチェーンが `$HOME/.cache` を作成してしまい、Modal が Volume をマウントする前にそのパスへ実体ができてしまうため、Modal が「マウント先が空でない」として拒否すること。`hh_hooks/tool_gate.py` の `_hh_agent_home()` は `USERPROFILE`（Windows 由来の変数名だが Linux コンテナでも読める）を `Path.home()` より先にチェックするため、`HOME` ではなく `USERPROFILE` だけを `/opt/data` に向ければ、他のツールチェーンには一切影響を与えずに同じ効果（`~/.hh-agent/` = `/opt/data/.hh-agent/`）を得られる。§3.4 のトークン自動更新関数とも同じパスを共有できる点は変更なし（両関数とも同じ Volume を `/opt/data` にマウントするため）。
 
 `max_containers=1` により、複数コンテナ間のセッションルーティング問題自体が発生しない（§0 参照）。コールドスタート SLO は既存 Phase1a の合意（10 秒許容）をそのまま踏襲する。
 
@@ -109,7 +109,7 @@ Phase1a の `hh_hermes.py`（`startup_guard.enforce_or_exit()` を経由する�
 
 ### 3.3 agent_token.json の配置とスコープ
 
-`hh_hooks/tool_gate.py` はトークンファイルを `_hh_agent_home() / "agent_token.json"` という決め打ちパス（`USERPROFILE` 環境変数優先、無ければ `Path.home()`）からしか読めない（環境変数オーバーライド経路が無い）。§2.2 で `HOME=/opt/data` を設定するため、実体は `/opt/data/.hh-agent/agent_token.json`（Volume 上・永続）になる。
+`hh_hooks/tool_gate.py` はトークンファイルを `_hh_agent_home() / "agent_token.json"` という決め打ちパス（`USERPROFILE` 環境変数優先、無ければ `Path.home()`）からしか読めない（環境変数オーバーライド経路が無い）。§2.2 で `USERPROFILE=/opt/data` を設定するため、実体は `/opt/data/.hh-agent/agent_token.json`（Volume 上・永続）になる。
 
 - Hub URL: `HH_AGENT_HUB_URL` 環境変数（Modal Secret 経由）で注入。ファイル書き込み不要
 - `agent_token.json`: **存在しない場合のみ**（初回起動時）ASGI 関数側で最小限のブートストラップを行う（§3.1 の config.yaml と同じ「無ければ作る、あれば触らない」方針。理由は下記）。中身はローカル PC の `agent_token.json` とは**別発行**のトークン（Distiller 用 `distill_token.json` を別発行したのと同じ考え方）。スコープは Phase1a の承認フロー4 エンドポイント相当（`request`/`poll`/`claim`/`complete`）のみで、`publish` は含めない

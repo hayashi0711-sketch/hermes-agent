@@ -58,12 +58,22 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
 ENV HERMES_HOME=/opt/data
-ENV HOME=/opt/data
+# USERPROFILE, not HOME: hh_hooks/tool_gate.py's _hh_agent_home() checks
+# USERPROFILE first (Windows-style var, unused by anything else on Linux)
+# and only falls back to Path.home() if it's unset. Setting HOME=/opt/data
+# instead was tried first and broke deploys: the moment the container
+# process starts, Python/uv/the toolchain write a $HOME/.cache directory
+# BEFORE Modal mounts the Volume, so Modal's mount then fails with "cannot
+# mount volume on non-empty path" (all containers crash-looped with this
+# exact error on a real deploy). USERPROFILE has no such side effect on
+# Linux -- nothing else reads it -- so it seeds the same persistent path
+# for agent_token.json/config.yaml (docs/hh-agent/08_Phase1c_Spec.md §3.3)
+# without anything writing into the mount point pre-mount.
+ENV USERPROFILE=/opt/data
 ENV HERMES_DISABLE_LAZY_INSTALLS=1
 ENV PATH="/opt/hermes/.venv/bin:${PATH}"
 # Do NOT `mkdir -p /opt/data` here: Modal mounts the hh-agent-dashboard-home
 # Volume at this exact path, and refuses to mount onto a path that already
 # has a filesystem entry baked into the image ("cannot mount volume on
-# non-empty path"). Discovered via a real deploy failure (all containers
-# crash-looped with that exact error) -- Modal creates the mount point
-# itself, so this directory must not exist in the image at all.
+# non-empty path"). Modal creates the mount point itself, so this directory
+# must not exist in the image at all.
