@@ -511,29 +511,24 @@ Modal 上のクラウドエージェントは当然 TTY を持たないため、
 
 ### 4.6 Modal クラウドコーディングエージェント (`routers/cloud_agent.py`)
 
-**Phase 1c。着手前に PoC で 2 つの前提を潰す。**
+**Phase 1c。2026-08-13 に PoC①②とも実機で通過し、`docs/hh-agent/08_Phase1c_Spec.md` に実装契約を確定した。以下は確定済みの方針（詳細・根拠は同ファイル参照）。**
 
 - **実行体**: Hermes CLI 本体。Modal Image に本リポジトリを焼き込む。
 - **UI**: **`web/` の静的 dist だけを配信する方式は成立しない**（Codex 検証済み）。`web/src/pages/ChatPage.tsx` の主チャットは JSON-RPC 直結ではなく `/api/pty` で `hermes --tui` を起動する xterm 画面であり、SPA は REST API・WS チケット・`/api/ws`・`/api/pub`・`/api/events` にも依存する。さらに `tui_gateway/server.py` のセッションは**プロセス内 dict** で保持される。
-  → **Hermes 自身の `dashboard` をそのまま丸ごとホストする。** その前段に H-H Agent の認証を置く。
+  → **Hermes 自身の `dashboard`（`hermes_cli.web_server:app`）をそのまま丸ごと ASGI としてホストする。** その前段に H-H Agent の認証は置かない（`08_Phase1c_Spec.md` §2.3。脅威モデルが異なるため Hermes 本体の `_SESSION_TOKEN` のみで完結させる）。
   **`serve` は使えない**（D-18）。`serve` は明示的に headless で「no UI build, no SPA mount」（`hermes_cli/main.py:10277`）。ブラウザ UI が必要なら `dashboard`、または「別途ビルドした SPA ＋ `serve`」の 2 択であり、`serve` 単体でブラウザ UI は出ない。
-- **セッションアフィニティ必須**: セッション状態がプロセス内にあるため、**1 セッション = 1 コンテナに固定する**。
-  **`min_containers` はセッションアフィニティではない**（warm コンテナ数を指定するだけ）。v2 の「`min_containers` とコンテナ ID ベースのルーティング」という記述は Modal の実 API に対応する具体策が無く、成立しない。
-  → **1 セッション = 1 Modal Sandbox** 方式を採る。この方式は次をすべて設計しないと動かないため、Phase 1c の設計項目として明示する:
-  1. Sandbox の生成とライフサイクル（起動・停止・期限切れ）
-  2. Sandbox への URL / WebSocket のプロキシ
-  3. 切断からの再接続（Sandbox が生きている間の復帰）
-  4. Sandbox 単位の認証（他人のセッションに繋がらないこと）
-  5. スケールダウン／クラッシュ時の扱い
-- **承認の合流**: `%HERMES_HOME%\config.yaml` の `pre_tool_call` フック（§4.4）を有効にして起動する。**`set_approval_callback()` は使わない**（スレッドローカルであり、実行ワーカースレッドでは `None` になる。またコールバックには redact 済みコマンドしか渡らず、cwd・差分・session_id を受け取れない）。
+- **セッションアフィニティ: `max_containers=1` による単一コンテナ固定で解決する**（2026-08-13 改訂。旧「1 セッション = 1 Modal Sandbox」方式は撤回）。
+  セッション状態がプロセス内 dict にある、という制約自体は元の指摘のとおり正しい。だが本プロジェクトは個人単一ユーザー運用で同時アクセスは実質 1 系統のため、**コンテナを常に 1 個に固定すればそもそも複数コンテナ間のルーティング問題自体が発生しない**。これにより Sandbox 生成・URL/WS プロキシ・再接続・Sandbox 単位認証・スケールダウン復旧という 5 項目の個別設計が丸ごと不要になった。加えて `max_containers=1` は「Modal Volume への複数コンテナ同時書き込みで行が消える」（既知の落とし穴）と Hermes 自体の単一プロセス前提（PID 管理・SQLite WAL・多重起動検出）を両方構造的に回避する副次効果も持つ。詳細は `08_Phase1c_Spec.md` §2.2。
+  （**`min_containers` はセッションアフィニティではない**という旧記述の指摘自体は引き続き正しい。`max_containers=1` は「warm container 数」ではなく「上限」を固定する設定であり、これが単一コンテナを保証する）
+- **承認の合流（D-14、最重要。変更なし）**: `%HERMES_HOME%\config.yaml` の `pre_tool_call` フック（§4.4）を、Phase1c ではコンテナ初回起動時にシーディングして有効化する（HERMES_HOME が空の新規 Volume から始まるため。詳細は `08_Phase1c_Spec.md` §3）。**`set_approval_callback()` は使わない**（スレッドローカルであり、実行ワーカースレッドでは `None` になる。またコールバックには redact 済みコマンドしか渡らず、cwd・差分・session_id を受け取れない）。
 - **D-14 の再掲（最重要）**: Hermes を `env_type="modal"` で起動してはならない。承認ガードが丸ごとスキップされる。
 
-**PoC の合否条件**:
+**PoC の合否条件（2026-08-13 実機で両方通過。詳細数値は `08_Phase1c_Spec.md` §0）**:
 
-1. Hermes の依存関係一式を載せた Modal Image が **5GB / ビルド 10 分**以内に収まるか。
-2. `serve` バックエンドが Modal の ASGI 上で起動し、`/api/pty` が機能するか。
+1. Hermes の依存関係一式を載せた Modal Image が **5GB / ビルド 10 分**以内に収まるか → **通過**（実測 632MB / 75.93 秒）
+2. `dashboard` バックエンド（`hermes_cli.web_server:app`）が Modal の ASGI 上で起動し、`/api/pty` が機能するか → **通過**（`/api/pty` の WebSocket で実際に `hermes --tui` が起動し ANSI 出力を確認）
 
-**どちらか失敗したら Phase 1c を Phase 2 へ送り、Phase 1a/1b だけで一度完成させる。**
+両方通過したため Phase 1c は Phase 2 送りにせず前進する。本実装の詳細は `docs/hh-agent/08_Phase1c_Spec.md` を参照。
 
 ### 4.7 Skill Distiller (`services/skill_distiller.py`, `services/session_reader.py`)
 
