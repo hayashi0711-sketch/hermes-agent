@@ -33,6 +33,12 @@
 #     詳細は modal_hub/core/risk.py 側のコメント、および
 #     modal_hub/tests/test_risk.py の outbound_post 系テストを参照。
 #   05_Phase1a_Spec.md §5.1 の改訂は別途必要（本タスクの所有範囲外）。
+#   - BUG-5（2026-08-14、林さんの明示指示によりCritical緊急修正として本ファイルを直接修正）:
+#     Phase1a策定時点のHermesには存在しなかった `skills_list` / `skill_view`
+#     ツール（スキルカタログの一覧・閲覧。読み取り専用、副作用は使用状況カウンタの
+#     更新のみ）が tool_aliases に未列挙のまま unknown_tool → 常時拒否
+#     （hh_hooks/tool_gate.py）に落ち、Modalダッシュボードでスキル機能が全滅していた。
+#     read カテゴリへ追加して解消。詳細: docs/hh-agent/05_Phase1a_Spec.md §5.1 追記済み。
 #
 # modal_hub/core/risk.py が読み込む契約:
 #   - version: スキーマバージョン（未使用でも将来の互換性チェック用に必須）
@@ -54,7 +60,7 @@ tool_aliases:
   write:    [Write, write_file, create_file]
   edit:     [Edit, MultiEdit, str_replace_editor, edit_file]
   notebook: [NotebookEdit]
-  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search]
+  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search, skills_list, skill_view]
 
 # 読み取り専用として素通りさせるカテゴリ。ここに無いものは副作用ありとみなす。
 read_only_categories: [read]

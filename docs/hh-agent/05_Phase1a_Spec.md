@@ -434,7 +434,7 @@ tool_aliases:
   write:    [Write, write_file, create_file]
   edit:     [Edit, MultiEdit, str_replace_editor, edit_file]
   notebook: [NotebookEdit]
-  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search]
+  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search, skills_list, skill_view]
 
 # 読み取り専用として素通りさせるカテゴリ。ここに無いものは副作用ありとみなす。
 read_only_categories: [read]
@@ -462,6 +462,8 @@ medium:
 - ルールは `high` → `medium` の順に評価し、**最初にマッチしたものを採用**する。
 - `pattern` は正規化済みコマンド文字列に対して、`path_pattern` は各 target の `realpath` に対して適用する。
 - 未マッチは `LOW`。
+
+**BUG-5（2026-08-14、Critical・緊急修正）**: `skills_list`/`skill_view`（Hermesのスキルカタログ一覧・閲覧ツール。読み取り専用、副作用は使用状況カウンタ更新のみ）が`tool_aliases`に未列挙のまま`unknown_tool`→HIGHに落ち、`hh_hooks/tool_gate.py`の「未知ツールは常時拒否」設計と組み合わさって、Modalダッシュボードでスキル機能が完全に使用不能になっていた。§5.2の運用ルール（「読み取り専用と確認できたものだけを人間が明示的に追加」）どおり、コード確認（`tools/skills_tool.py`のハンドラが読み取りのみでファイル書き込み・コマンド実行を行わないことを確認済み）の上で`read`カテゴリへ追加して解消。
 
 #### 5.1a **上のスキーマ例には誤りがある**（2026-08-11・テストが発見）
 

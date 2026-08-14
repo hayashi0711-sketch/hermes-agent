@@ -94,6 +94,16 @@ def test_read_category_tools_are_low_without_touching_input(tool_name: str) -> N
     assert result.rule_id == "read_only"
 
 
+@pytest.mark.parametrize("tool_name", ["skills_list", "skill_view"])
+def test_skill_tools_are_low_bug5_regression(tool_name: str) -> None:
+    """BUG-5 回帰: skills_list/skill_view が unknown_tool -> HIGH に落ちていた
+    ため、Modalダッシュボードでスキル機能が全滅していた（tool_gate.py が
+    unknown_tool を常時拒否する設計のため）。read カテゴリへ追加して解消。"""
+    result = risk.classify(tool_name, {"name": "some-skill"})
+    assert result.level == "LOW"
+    assert result.rule_id == "read_only"
+
+
 # ===========================================================================
 # 未知のツール → HIGH に格上げ（Phase1a spec §5.2。安全性クリティカル）
 # ===========================================================================
