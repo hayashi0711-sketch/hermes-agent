@@ -817,6 +817,10 @@ App `multi-ai-coder-agent` / `3llm-max` / `jarvis-backend` / `corpus2skill`。
 15. `dashboard` を Modal ASGI へ統合する具体的方式、sticky routing、再接続、スケールダウン復旧。
 16. Sandbox のライフサイクル・プロキシ・認証（§4.6 の 5 項目）。
 
+**Corpus2Skill Memory Provider 連携着手前に必須**
+
+17. 下記 §13 参照。
+
 ---
 
 ## 12. 実装担当の分割方針
@@ -828,3 +832,43 @@ App `multi-ai-coder-agent` / `3llm-max` / `jarvis-backend` / `corpus2skill`。
 | **Claude Code Sonnet 5** | 30% | セキュリティ・状態機械・既存 Hermes との接続部（`core/security.py`, `core/risk.py`, `routers/approval_gate.py`, `services/audit.py`, `hh_hooks/*`）＝ 間違うと安全性が壊れる箇所 |
 | **MiniMax M3** | 70% | UI・定型実装・テスト（`mobile_app/pwa_approval/*`, `services/skill_distiller.py`, `services/notifier.py`, `services/memory_bridge.py`, `core/config.py`, `core/store.py`, `modal_hub/tests/*`） |
 | **Codex** | — | 全コードのレビュー（`codex exec review --uncommitted`）＋ 設計書レビュー ＋ GitHub push ＋ Modal Secret 作成 |
+
+---
+
+## 13. Corpus2Skill Memory Provider プラグイン（設計案・未着手・2026-08-15）
+
+**目的**: Windowsネイティブ Hermes と Modal 上の Hermes（Phase1c dashboard）を別々にチャット利用したとき、一方が知っていてもう一方が知らないという記憶の差異が生じる。Hermes公式の「Memory Provider」プラグイン機構（`agent/memory_provider.py` の `MemoryProvider` ABC）を使い、Corpus2Skill自身をバックエンドとするプロバイダを実装してこれを解消する。バックエンド側（Lane B の新設）の設計は `Corpus2Skill/doc/03_Architecture.md` §12 を参照（両ファイルは対で読むこと）。
+
+### M-05: プラグインの配置先は「Bundled」ではなく「Project Provider」
+
+Hermesのプラグイン発見順位（Bundled → User → Project → Package）のうち、リポジトリ直下 `plugins/memory/<name>/` は **「新規プロバイダには閉じている」**（公式ドキュメント上の制約）。このリポジトリはNousResearch本家からのupstream同期（592コミットマージの実績あり）を継続する運用のため、本家が予約している領域には触れない。
+
+**採用: `./.hermes/plugins/corpus2skill/`（Project Provider、`HERMES_ENABLE_PROJECT_PLUGINS=1` が必要）。** git管理下に置け、Codexレビューの対象になり、Modal イメージへは既存の `add_local_dir` 系の仕組みでそのまま含められる。D-01（Hermes本体を無改変のまま疎結合アドオンを増設する）にも合致する。
+
+Windows側（ネイティブHermesアプリ、このリポジトリのクローンではない別インストール）には、同じプラグインフォルダを `$HERMES_HOME\plugins\corpus2skill\`（User Provider）へ手動コピーする。コード本体は1つ、配置経路だけが2通り。
+
+### M-06: プラグインが実装するフック
+
+| フック | 用途 | 頻度 | 遅延許容度 |
+|---|---|---|---|
+| `is_available()` | `CORPUS2SKILL_API_KEY` の存在確認のみ（ネットワーク呼び出し禁止、契約どおり） | 起動時 | — |
+| `initialize(session_id, **kwargs)` | api_key・base_url・session_id を保持 | 起動時 | — |
+| `prefetch(query, *, session_id="")` | Corpus2Skillの `search_memory`（Lane A）＋ `journal_recall`（Lane B）を呼び、結果を合成してコンテキストへ注入 | 毎ターン | 同期・軽量（両方ともLLM不使用の安価な検索） |
+| `sync_turn(user, assistant, *, session_id="", messages=None)` | `journal_write`（Lane B）へ書き込み | 毎ターン | **非同期必須**（公式契約どおりデーモンスレッド） |
+| `on_session_end(messages)` | v1では no-op（Lane B→Lane Aの昇格は見送り、`Corpus2Skill/doc/03_Architecture.md` §12の未確定事項D参照） | セッション終了時 | — |
+| `get_tool_schemas()` / `handle_tool_call()` | 明示ツール `corpus2skill_search(query, limit)` を1つだけ公開（自動prefetchとは別に、エージェントが能動的に検索したい場合用） | エージェントのツール呼び出し時 | — |
+
+### M-07: risk_rules.yaml への影響
+
+**`prefetch`・`sync_turn`・`on_session_end` はHermesのフレームワークが自動的に呼ぶものであり、エージェントのツール呼び出し（tool-calling）としては現れない。** よって `risk_rules.yaml` の分類対象には**ならない**（BUG-5と混同しないこと）。
+
+**`get_tool_schemas()` で公開する `corpus2skill_search` のみ**、エージェントが明示的に呼び出せるツールとして現れるため、`modal_hub/core/risk_rules.yaml` と `hh_hooks/risk_rules.yaml` の両方（BUG-5修正時と同じ2箇所、`scripts/sync_hook_modules.py`で再生成）に `read` カテゴリとして追加する。**書き込み系ツール（`journal_write`・`add_new_memory`相当）はエージェント呼び出し可能なツールとして一切公開しない**（get_tool_schemasに含めない＝存在しないのと同じ扱い）。
+
+### 未確定事項（実装着手前に埋める）
+
+| # | 内容 |
+|---|---|
+| E | Modal dashboard コンテナの `HERMES_HOME`（Volume `hh-agent-dashboard-home`）に `HERMES_ENABLE_PROJECT_PLUGINS=1` を設定する具体的な箇所（Dockerfile環境変数か、起動スクリプトか） |
+| F | Windows側への手動コピー手順を一度きりの手順書にするか、簡易インストールスクリプトにするか |
+
+**E・Fとも実装をブロックしない。** プラグイン本体の実装・テストはローカルのfake経由で先行できる。

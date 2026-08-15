@@ -104,6 +104,20 @@ def test_skill_tools_are_low_bug5_regression(tool_name: str) -> None:
     assert result.rule_id == "read_only"
 
 
+def test_corpus2skill_search_is_low_m07() -> None:
+    """M-07（03_Architecture.md §13 Corpus2Skill Memory Provider プラグイン）:
+    プラグインが get_tool_schemas() で公開する唯一のエージェント呼び出し可能
+    ツール `corpus2skill_search` は read カテゴリで LOW。BUG-5 と同じ理由
+    （tool_aliases に未列挙のツールは unknown_tool -> HIGH に格上げされ、
+    Modal ダッシュボードで機能が全滅する）で read カテゴリへの列挙が必須。
+    `prefetch`/`sync_turn`/`on_session_end` はHermesフレームワークが自動的に
+    呼ぶものでありツール呼び出しとして現れないため、このファイルの分類対象には
+    ならない（BUG-5と混同しないこと）。"""
+    result = risk.classify("corpus2skill_search", {"query": "some query", "limit": 5})
+    assert result.level == "LOW"
+    assert result.rule_id == "read_only"
+
+
 # ===========================================================================
 # 未知のツール → HIGH に格上げ（Phase1a spec §5.2。安全性クリティカル）
 # ===========================================================================

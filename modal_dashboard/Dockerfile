@@ -70,6 +70,15 @@ ENV HERMES_HOME=/opt/data
 # for agent_token.json/config.yaml (docs/hh-agent/08_Phase1c_Spec.md §3.3)
 # without anything writing into the mount point pre-mount.
 ENV USERPROFILE=/opt/data
+# Lets Hermes discover Project Provider plugins from the repo-local
+# ./.hermes/plugins/ directory (docs/hh-agent/03_Architecture.md §13 M-05:
+# Corpus2Skill Memory Provider plugin, ./.hermes/plugins/corpus2skill/).
+# Without this, Hermes's plugin loader skips the Project Provider tier
+# entirely and the memory-provider plugin silently never loads in the
+# Modal dashboard container. `.hermes/` itself is not excluded by
+# .dockerignore, so `COPY . .` above already ships the plugin directory
+# into the image -- this ENV is the only missing wiring.
+ENV HERMES_ENABLE_PROJECT_PLUGINS=1
 ENV HERMES_DISABLE_LAZY_INSTALLS=1
 ENV PATH="/opt/hermes/.venv/bin:${PATH}"
 # Do NOT `mkdir -p /opt/data` here: Modal mounts the hh-agent-dashboard-home

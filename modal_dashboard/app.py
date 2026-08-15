@@ -40,6 +40,14 @@ _DASHBOARD_VOLUME_NAME = "hh-agent-dashboard-home"
 _DASHBOARD_MOUNT_PATH = "/opt/data"
 _DASHBOARD_SECRET_NAME = "hh-agent-dashboard-secret"
 _HUB_SECRET_NAME = "hh-agent-secret"  # ONLY attached to refresh_dashboard_agent_token -- see module docstring, C-3
+# Separate, dedicated Secret for the Corpus2Skill Memory Provider plugin
+# (docs/hh-agent/03_Architecture.md §13). Deliberately NOT folded into
+# _DASHBOARD_SECRET_NAME: Modal's `secret create --force` replaces a
+# secret's entire key set rather than merging, and this bundle's current
+# live values (ANTHROPIC_API_KEY, basic-auth username/password, Hub URL)
+# cannot be read back to safely recreate it with one more key added. A
+# separate Secret is purely additive and never touches the existing one.
+_CORPUS2SKILL_SECRET_NAME = "corpus2skill-secret"
 _DASHBOARD_PORT = 8000
 
 app = modal.App("hh-agent-dashboard")
@@ -85,7 +93,10 @@ def _ensure_agent_token_seeded(hermes_home: Path) -> None:
 @app.function(
     image=image,
     volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
-    secrets=[modal.Secret.from_name(_DASHBOARD_SECRET_NAME)],  # NOT hh-agent-secret -- see module docstring, C-3
+    secrets=[
+        modal.Secret.from_name(_DASHBOARD_SECRET_NAME),  # NOT hh-agent-secret -- see module docstring, C-3
+        modal.Secret.from_name(_CORPUS2SKILL_SECRET_NAME),  # CORPUS2SKILL_API_KEY only, see comment above
+    ],
     min_containers=0,       # scale-to-zero -- cost floor is $0 (docs/hh-agent/08_Phase1c_Spec.md §2.2)
     max_containers=1,       # required -- see Global Constraints
     scaledown_window=300,

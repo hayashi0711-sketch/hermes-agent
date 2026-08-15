@@ -3,6 +3,24 @@
 .gitignore
 .gitmodules
 
+# H-H-Agent secret files (real secret + timestamped backups). Excluded from
+# git via .git/info/exclude (local-only, per this project's convention), but
+# .dockerignore is entirely independent of git and needs its own exclusion --
+# without this, `COPY . .` below bakes the live Bearer/token-signing secret
+# straight into the Modal image (Codex review 2026-08-15, High finding).
+.hh-secret.env
+.hh-secret.env.*
+
+# Hermes runtime state that may exist in-repo during local development
+# (session DBs, config.yaml, caches, other project-local plugins). Only the
+# Corpus2Skill Memory Provider plugin should ever ship in the image -- see
+# docs/hh-agent/03_Architecture.md §13 M-05 and the equivalent .gitignore
+# exception (Codex review 2026-08-15, High finding).
+.hermes/*
+!.hermes/plugins/
+.hermes/plugins/*
+!.hermes/plugins/corpus2skill/
+
 # Python
 __pycache__
 *.py[cod]

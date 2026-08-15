@@ -1,0 +1,13 @@
+name: corpus2skill
+version: 0.1.0
+description: >-
+  Shares persistent memory between Windows-native Hermes and the
+  Modal-hosted Hermes (Phase1c dashboard) by reusing the existing
+  Corpus2Skill Modal app as a Hermes Memory Provider, over plain HTTPS
+  REST (no MCP client). Read-only tool surface: only corpus2skill_search
+  is exposed to the agent.
+hooks:
+  - system_prompt_block
+  - prefetch
+  - sync_turn
+  - on_session_end

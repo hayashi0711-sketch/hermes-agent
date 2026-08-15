@@ -39,6 +39,13 @@
 #     更新のみ）が tool_aliases に未列挙のまま unknown_tool → 常時拒否
 #     （hh_hooks/tool_gate.py）に落ち、Modalダッシュボードでスキル機能が全滅していた。
 #     read カテゴリへ追加して解消。詳細: docs/hh-agent/05_Phase1a_Spec.md §5.1 追記済み。
+#   - M-07（2026-08-15、Corpus2Skill Memory Provider プラグイン設計、
+#     docs/hh-agent/03_Architecture.md §13 M-07）: プラグインが get_tool_schemas()
+#     で公開する唯一のエージェント呼び出し可能ツール `corpus2skill_search` を
+#     read カテゴリへ追加。prefetch/sync_turn/on_session_end はHermesフレーム
+#     ワークが自動的に呼ぶものでありツール呼び出しとしては現れないため対象外
+#     （BUG-5と混同しないこと）。journal_write等の書き込み系ツールはこのファイル
+#     に一切追加しない（get_tool_schemasにも含まれず公開されない）。
 #
 # modal_hub/core/risk.py が読み込む契約:
 #   - version: スキーマバージョン（未使用でも将来の互換性チェック用に必須）
@@ -60,7 +67,7 @@ tool_aliases:
   write:    [Write, write_file, create_file]
   edit:     [Edit, MultiEdit, str_replace_editor, edit_file]
   notebook: [NotebookEdit]
-  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search, skills_list, skill_view]
+  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search, skills_list, skill_view, corpus2skill_search]
 
 # 読み取り専用として素通りさせるカテゴリ。ここに無いものは副作用ありとみなす。
 read_only_categories: [read]

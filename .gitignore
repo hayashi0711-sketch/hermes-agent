@@ -139,7 +139,16 @@ docs/superpowers/*
 # Working directory for the Hermes Agent's session state (~/.hermes/ at runtime;
 # also created in-repo when an agent operates in this checkout). Plans, audit
 # logs, and per-session caches are never artifacts of the codebase.
-.hermes/
+#
+# Exception (2026-08-15, docs/hh-agent/03_Architecture.md §13 M-05): the
+# Corpus2Skill Memory Provider plugin is deployed as a "Project Provider"
+# and must live at ./.hermes/plugins/corpus2skill/ as tracked source code
+# (git-tracked, Codex-reviewed), not as runtime state. Everything else
+# under .hermes/ stays ignored.
+.hermes/*
+!.hermes/plugins/
+.hermes/plugins/*
+!.hermes/plugins/corpus2skill/
 
 # Desktop/bootstrap install marker written into the managed checkout root by the
 # bootstrap installer. It is Hermes-managed runtime state, never a code change —
