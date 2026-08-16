@@ -1,4 +1,10 @@
 .DS_Store
+# PyInstaller build artifacts for scripts/install_corpus2skill_plugin_gui.py
+# (the compiled .exe is distributed out-of-band, not via git -- see
+# 08_Handoff_Note.md "Corpus2SkillInstaller.exe の配布" for why)
+scripts/build/
+scripts/dist/
+scripts/*.spec
 /venv/
 /venv.old/
 /venv.stale.runtime-*/
