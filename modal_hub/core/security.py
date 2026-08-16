@@ -134,6 +134,10 @@ _LEGACY_DEFAULT_SCOPES = frozenset({"request", "poll", "claim", "complete"})
 #: `POST /api/skills/publish` を呼べるスコープ名（Phase1b §5）。
 SCOPE_PUBLISH = "publish"
 
+#: `GET /api/skills/quarantine` を呼べるスコープ名（S-08b。既存の
+#: エージェントトークン + scopes 機構を再利用。新規 Secret は作らない）。
+SCOPE_QUARANTINE_READ = "quarantine_read"
+
 #: PWA セッション Cookie の有効期限（Phase1a spec §7.2「exp は発行から30日」）。
 PWA_SESSION_TTL_SECONDS = 30 * 24 * 3600
 
@@ -1132,6 +1136,7 @@ __all__ = [
     "PAIRING_OFFER_TTL_SECONDS",
     "PAIRING_CODE_LENGTH",
     "SCOPE_PUBLISH",
+    "SCOPE_QUARANTINE_READ",
     # 例外
     "SecurityError",
     "InvalidCredentialError",

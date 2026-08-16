@@ -362,6 +362,10 @@ def test_every_text_file_operation_specifies_an_encoding() -> None:
             )
             if name not in ("open", "read_text", "write_text"):
                 continue
+            # os.open() は fd を返す生システムコールで、encoding の概念が
+            # 無い（builtin open のみがテキスト I/O の対象）。
+            if name == "open" and not isinstance(node.func, ast.Name):
+                continue
             rendered = ast.unparse(node)
             if "encoding" in rendered or '"wb"' in rendered or '"rb"' in rendered or "'b'" in rendered:
                 continue

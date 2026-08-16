@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 
 import pytest
 
@@ -277,3 +279,233 @@ def test_put_if_absent_returns_false_when_another_writer_won(monkeypatch) -> Non
     won = store.put_if_absent("lease:1", {"lease_id": "MINE", "claim_attempt_id": "my-attempt"})
     assert store.get("lease:1")["lease_id"] == "OTHER"
     assert won is False, "自分の書き込みが負けたのに True を返した（二重実行の経路）"
+
+
+# ===========================================================================
+# S-08c: quarantine 消し込みマーカー（mark/get_quarantine_resolved）
+# ===========================================================================
+
+
+def test_quarantine_resolved_marker_round_trip(fake_dict) -> None:
+    """書いた値がそのまま読めること・未設定は None であること。"""
+    assert store.get_quarantine_resolved("alpha-skill") is None
+    store.mark_quarantine_resolved("alpha-skill", "a" * 64)
+    assert store.get_quarantine_resolved("alpha-skill") == "a" * 64
+
+
+def test_quarantine_resolved_marker_overwrites_unconditionally(fake_dict) -> None:
+    """書き手は sync_dashboard_skills 唯一なので put_if_absent は使わない
+    無条件上書き（dict[key] = value 相当）でよい。
+
+    `FakeModalDict.put_calls` の skip フラグで「skip_if_exists=True の
+    排他ではない」ことを確認する。
+    """
+    store.mark_quarantine_resolved("alpha-skill", "a" * 64)
+    store.mark_quarantine_resolved("alpha-skill", "b" * 64)
+    assert store.get_quarantine_resolved("alpha-skill") == "b" * 64
+    assert fake_dict.put_calls and all(skip is False for _key, skip in fake_dict.put_calls)
+
+
+# ===========================================================================
+# S-08b/S-08c: quarantine の安全な読み取り（read_quarantine_entry_safe）
+# ===========================================================================
+
+
+def _write_quarantine_entry(root, name: str, *, skill_md: str | None = None, meta: dict | None = None) -> None:
+    """テスト用に volume root 直下へ quarantine エントリ（SKILL.md + meta.json）を書く。"""
+    d = root / "skills_quarantine" / name
+    d.mkdir(parents=True, exist_ok=True)
+    md = skill_md if skill_md is not None else f"---\nname: {name}\ndescription: d\n---\n\nBody.\n"
+    (d / "SKILL.md").write_bytes(md.encode("utf-8"))
+    if meta is not None:
+        (d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_read_quarantine_entry_safe_returns_full_entry(volume_root) -> None:
+    md = (
+        "---\nname: alpha-skill\ndescription: d\nversion: 0.1.0\n"
+        "distilled_from_session_id: sess-abc\n---\n\nBody.\n"
+    )
+    _write_quarantine_entry(
+        volume_root, "alpha-skill", skill_md=md,
+        meta={"origin_instance": "win-1", "published_at": 123.0},
+    )
+    entry = store.read_quarantine_entry_safe("alpha-skill")
+    assert entry is not None
+    assert entry["content"] == md
+    assert entry["content_sha256"] == hashlib.sha256(md.encode("utf-8")).hexdigest()
+    assert entry["origin_instance"] == "win-1"
+    assert entry["published_at"] == 123.0
+    assert entry["distilled_from_session_id"] == "sess-abc"
+
+
+def test_read_quarantine_entry_safe_rejects_invalid_names(volume_root) -> None:
+    """NAME_RE を再利用し、不正な name は None（パストラバーサル等も含む）。"""
+    _write_quarantine_entry(volume_root, "alpha-skill")
+    for bad in ("Bad Name", "../etc/passwd", ".hidden", "a", "", "alpha-skill/"):
+        assert store.read_quarantine_entry_safe(bad) is None
+
+
+def test_read_quarantine_entry_safe_missing_entries_return_none(volume_root) -> None:
+    """root 自体・<name> ディレクトリ・SKILL.md が無い場合は None。"""
+    assert store.read_quarantine_entry_safe("no-root") is None  # skills_quarantine 自体が無い
+    _write_quarantine_entry(volume_root, "no-md")
+    (volume_root / "skills_quarantine" / "no-md" / "SKILL.md").unlink()
+    assert store.read_quarantine_entry_safe("no-md") is None
+
+
+def test_read_quarantine_entry_safe_meta_missing_or_corrupt_falls_back(volume_root) -> None:
+    """meta.json の欠損・破損・非 object・フィールド型不正は例外にせず
+    origin_instance: None / published_at: None へフォールバックする。"""
+    # 欠損
+    _write_quarantine_entry(volume_root, "no-meta")
+    entry = store.read_quarantine_entry_safe("no-meta")
+    assert entry is not None
+    assert entry["origin_instance"] is None and entry["published_at"] is None
+
+    # 破損 JSON
+    _write_quarantine_entry(volume_root, "bad-meta")
+    (volume_root / "skills_quarantine" / "bad-meta" / "meta.json").write_text("{not json", encoding="utf-8")
+    entry = store.read_quarantine_entry_safe("bad-meta")
+    assert entry is not None
+    assert entry["origin_instance"] is None and entry["published_at"] is None
+
+    # valid JSON だが object でない
+    _write_quarantine_entry(volume_root, "list-meta")
+    (volume_root / "skills_quarantine" / "list-meta" / "meta.json").write_text("[1,2,3]", encoding="utf-8")
+    entry = store.read_quarantine_entry_safe("list-meta")
+    assert entry is not None
+    assert entry["origin_instance"] is None and entry["published_at"] is None
+
+    # フィールド型不正（origin_instance が数値・published_at が文字列）
+    _write_quarantine_entry(volume_root, "type-meta")
+    (volume_root / "skills_quarantine" / "type-meta" / "meta.json").write_text(
+        json.dumps({"origin_instance": 123, "published_at": "x"}), encoding="utf-8"
+    )
+    entry = store.read_quarantine_entry_safe("type-meta")
+    assert entry is not None
+    assert entry["origin_instance"] is None and entry["published_at"] is None
+
+
+def test_read_quarantine_entry_safe_rejects_oversized_skill_md(volume_root) -> None:
+    """64KB を超える本文は一括 read ではなく境界付き read（fstat サイズ検査 +
+    上限ループ）で弾かれる。"""
+    big = f"---\nname: big-skill\ndescription: d\n---\n\n{'x' * (store.MAX_BODY_BYTES + 1)}\n"
+    _write_quarantine_entry(volume_root, "big-skill", skill_md=big)
+    assert store.read_quarantine_entry_safe("big-skill") is None
+
+
+def test_read_quarantine_entry_safe_distilled_field_handles_broken_frontmatter(volume_root) -> None:
+    """frontmatter が壊れている・無い場合、distilled_from_session_id は None
+    （本文は読めるためエントリ自体は返る）。"""
+    _write_quarantine_entry(volume_root, "broken-fm", skill_md="---\nname: broken-fm\nbroken: [\n---\n\nBody.\n")
+    entry = store.read_quarantine_entry_safe("broken-fm")
+    assert entry is not None
+    assert entry["distilled_from_session_id"] is None
+
+    _write_quarantine_entry(volume_root, "no-fm", skill_md="No frontmatter here.\n")
+    entry = store.read_quarantine_entry_safe("no-fm")
+    assert entry is not None
+    assert entry["distilled_from_session_id"] is None
+
+
+def test_read_quarantine_entry_safe_rejects_non_utf8_skill_md(volume_root) -> None:
+    d = volume_root / "skills_quarantine" / "bin-skill"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_bytes(b"\xff\xfe\x00binary")
+    assert store.read_quarantine_entry_safe("bin-skill") is None
+
+
+# ---------------------------------------------------------------------------
+# symlink 差し替え攻撃への防御
+# ---------------------------------------------------------------------------
+
+
+def _try_make_symlink(link_path, target, *, directory: bool) -> bool:
+    """実 symlink を作れる環境なら作って True、作れない（Windows 非管理者等）
+    環境では False（呼び出し側が代替検証テストに委ねる）。"""
+    try:
+        os.symlink(target, link_path, target_is_directory=directory)
+        return True
+    except OSError:
+        return False
+
+
+def test_read_quarantine_entry_safe_rejects_symlinked_entry_dir(volume_root, tmp_path) -> None:
+    """<name> ディレクトリ自体が symlink に差し替えられたら読み取りを拒否
+    （openat 経路は O_NOFOLLOW で ELOOP、代替経路は islink で拒否）。"""
+    outside = tmp_path / "attacker-dir"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("pwned", encoding="utf-8")
+    (volume_root / "skills_quarantine").mkdir(parents=True, exist_ok=True)
+    entry_dir = volume_root / "skills_quarantine" / "real-skill"
+    if not _try_make_symlink(entry_dir, outside, directory=True):
+        pytest.skip("symlink creation is not permitted on this platform")
+    assert store.read_quarantine_entry_safe("real-skill") is None
+
+
+def test_read_quarantine_entry_safe_rejects_symlinked_skill_md(volume_root, tmp_path) -> None:
+    """SKILL.md 自体が symlink に差し替えられたら読み取りを拒否。"""
+    _write_quarantine_entry(volume_root, "md-link-skill")
+    outside = tmp_path / "outside.md"
+    outside.write_text("pwned", encoding="utf-8")
+    skill_file = volume_root / "skills_quarantine" / "md-link-skill" / "SKILL.md"
+    skill_file.unlink()
+    if not _try_make_symlink(skill_file, outside, directory=False):
+        pytest.skip("symlink creation is not permitted on this platform")
+    assert store.read_quarantine_entry_safe("md-link-skill") is None
+
+
+def test_read_quarantine_entry_safe_meta_symlink_falls_back(volume_root, tmp_path) -> None:
+    """meta.json だけ symlink に差し替えられても本文は返し、メタは None へ
+    フォールバックする（本文の安全性には影響しないため 500 にしない）。"""
+    _write_quarantine_entry(
+        volume_root, "meta-link-skill", meta={"origin_instance": "win-1", "published_at": 1.0}
+    )
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"origin_instance": "pwned", "published_at": 9.0}', encoding="utf-8")
+    meta_file = volume_root / "skills_quarantine" / "meta-link-skill" / "meta.json"
+    meta_file.unlink()
+    if not _try_make_symlink(meta_file, outside, directory=False):
+        pytest.skip("symlink creation is not permitted on this platform")
+    entry = store.read_quarantine_entry_safe("meta-link-skill")
+    assert entry is not None
+    assert entry["origin_instance"] is None and entry["published_at"] is None
+
+
+@pytest.mark.parametrize(
+    "suffix,entry_name,expect",
+    [
+        # <name> ディレクトリ自体が symlink → エントリ全体を拒否
+        ("skills_quarantine/evil-dir", "evil-dir", None),
+        # SKILL.md 自体が symlink → エントリ全体を拒否
+        ("SKILL.md", "evil-md", None),
+        # meta.json 自体が symlink → 例外にせず null フィールドへフォールバック
+        ("meta.json", "evil-meta", "fallback"),
+    ],
+)
+def test_read_quarantine_fallback_refuses_islink_marked_paths(
+    volume_root, monkeypatch, suffix: str, entry_name: str, expect
+) -> None:
+    """実 symlink を作成できない環境（Windows 非管理者等）での代替検証。
+
+    `os.path.islink()` が True を返す状態＝symlink 差し替えを模擬し、
+    O_NOFOLLOW / dir_fd を持たない代替実装が「symlink なら拒否する」こと
+    （meta.json は本文と非対称に null へフォールバック）を確認する。
+    """
+    _write_quarantine_entry(volume_root, entry_name, meta={"origin_instance": "win-1", "published_at": 1.0})
+    monkeypatch.setattr(store, "_HAVE_DIRFD_NOFOLLOW", False)  # 代替実装経路を強制
+    real_islink = os.path.islink
+    monkeypatch.setattr(
+        os.path,
+        "islink",
+        # Windows は `\` 区切りのため、照合前に両側を `/` 区切りへ正規化する
+        lambda p: os.fspath(p).replace(os.sep, "/").endswith(suffix) or real_islink(p),
+    )
+
+    entry = store.read_quarantine_entry_safe(entry_name)
+    if expect == "fallback":
+        assert entry is not None
+        assert entry["origin_instance"] is None and entry["published_at"] is None
+    else:
+        assert entry is None

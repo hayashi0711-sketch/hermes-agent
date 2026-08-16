@@ -75,6 +75,11 @@ PUBLISH_RATE_WINDOW_SECONDS = 3600
 
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
+#: S-08b: `origin_instance` の形式（S-04・S-10 が他の場所で使う規則と同一）。
+#: 第1文字は英小文字または数字、以後は英小文字・数字・._-、全体で最大64文字。
+#: 自己申告の表示・監査専用値であり、不一致は拒否せず None として扱う。
+_ORIGIN_INSTANCE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
 # `ApiError`/`error_response` は approval_gate.py の完全に汎用的な部品を
 # そのまま再利用する（同一所有者・重複実装を避ける）。
 ApiError = approval_gate.ApiError
@@ -179,7 +184,12 @@ def _encode_optional(value: Optional[str]) -> Optional[bytes]:
     return value.encode("utf-8") if value else None
 
 
-def _verify_publish_agent(request: Request, s: SkillsStore) -> security.AgentIdentity:
+def _verify_publish_agent(
+    request: Request, s: SkillsStore, *, scope: str = security.SCOPE_PUBLISH
+) -> security.AgentIdentity:
+    """既存 `POST /api/skills/publish` と同じ認可の仕組み（Bearer 検証 +
+    `require_scope`）。`scope` を差し替えることで新エンドポイント
+    （`GET /api/skills/quarantine` → `SCOPE_QUARANTINE_READ`）も同じ経路を使う。"""
     token = _bearer_token(request)
     try:
         identity = security.verify_agent_token(
@@ -192,9 +202,9 @@ def _verify_publish_agent(request: Request, s: SkillsStore) -> security.AgentIde
         raise ApiError(401, "UNAUTHORIZED", "agent token invalid", retryable=False) from exc
 
     try:
-        security.require_scope(identity, security.SCOPE_PUBLISH)
+        security.require_scope(identity, scope)
     except security.InsufficientScopeError as exc:
-        raise ApiError(403, "FORBIDDEN", "token lacks the publish scope", retryable=False) from exc
+        raise ApiError(403, "FORBIDDEN", f"token lacks the {scope} scope", retryable=False) from exc
 
     return identity
 
@@ -313,6 +323,14 @@ async def _publish_skill_core(request: Request, s: SkillsStore) -> JSONResponse:
             retryable=False,
         )
 
+    # S-08b: 任意項目 origin_instance（自己申告・表示/監査専用の非信頼値。
+    # 署名されない — S-08c の消し込み判定では信用しない）。型・形式を検証し、
+    # 不一致は拒否せず None として扱う（型・長さ・文字種を無検証で監査ログや
+    # 応答へ流さないという S-04 の規律。meta.json には検証済みの値だけが書かれる）。
+    origin_instance = body.get("origin_instance")
+    if not isinstance(origin_instance, str) or not _ORIGIN_INSTANCE_RE.match(origin_instance):
+        origin_instance = None
+
     # 書き込みセマンティクス: create-or-match-only（§5、無条件上書き禁止）。
     #
     # 2026-08-11 Codex レビュー Critical 指摘の修正: 旧実装は
@@ -363,6 +381,15 @@ async def _publish_skill_core(request: Request, s: SkillsStore) -> JSONResponse:
 
     # ロックを勝ち取った ＝ この name への最初の書き込み。
     s.atomic_write_file(rel_path, skill_md.encode("utf-8"))
+    # S-08b: meta.json（origin_instance sidecar）は「予約獲得後の新規書き込み」
+    # 分岐だけで書く。一度書かれた meta.json は quarantine エントリが存在する
+    # 限り不変 — 同一内容の再送・自己修復・409 の各分岐では一切触れない
+    # （後続の再送がどんな origin_instance を自己申告しても上書きされない）。
+    # published_at はクライアント申告を使わずサーバー側の時刻を使う。
+    s.write_json(
+        f"skills_quarantine/{name}/meta.json",
+        {"origin_instance": origin_instance, "published_at": time.time()},
+    )
     _record_publish_event(s, event="skill_published", name=name, sub=identity.sub, content_sha256=content_sha256)
 
     return JSONResponse(status_code=200, content={"status": "ok", "unchanged": False})
@@ -376,6 +403,56 @@ async def publish_skill(request: Request) -> JSONResponse:
         return error_response(exc)
     except Exception as exc:  # noqa: BLE001 — フェイルクローズ: 想定外は 500、握りつぶさない
         logger.exception("unexpected error in skills.publish_skill: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "INTERNAL_ERROR", "message": "internal error", "retryable": True}},
+        )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/skills/quarantine（S-08b: Windows からのリモート確認・署名用）
+# ---------------------------------------------------------------------------
+
+QUARANTINE_LIST_MAX_ENTRIES = 200  # §4.7: 隔離領域 200 件上限と同じ資源
+
+
+async def _quarantine_list_core(request: Request, s: SkillsStore) -> JSONResponse:
+    _verify_publish_agent(request, s, scope=security.SCOPE_QUARANTINE_READ)
+
+    # 読み取りのみ（消し込みは S-08c が別経路で行う）。安定した一覧のため
+    # ソートし、最大200件まで（超過分は含めない）。
+    names = sorted(store.list_dir("skills_quarantine"))[:QUARANTINE_LIST_MAX_ENTRIES]
+    skills: list[dict[str, Any]] = []
+    for name in names:
+        entry = store.read_quarantine_entry_safe(name)
+        if entry is None:
+            continue
+        # 消し込み済み（get_quarantine_resolved が現在の content_sha256 と
+        # 一致）エントリは既に確認・署名・push 済みであり、人間が再確認する
+        # 必要がないため応答から除外する（S-08c）。
+        if store.get_quarantine_resolved(name) == entry["content_sha256"]:
+            continue
+        skills.append(
+            {
+                "name": name,
+                "content": entry["content"],
+                "content_sha256": entry["content_sha256"],
+                "origin_instance": entry["origin_instance"],
+                "distilled_from_session_id": entry["distilled_from_session_id"],
+                "published_at": entry["published_at"],
+            }
+        )
+    return JSONResponse(status_code=200, content={"skills": skills})
+
+
+@router.get("/api/skills/quarantine")
+async def list_quarantine_skills(request: Request) -> JSONResponse:
+    try:
+        return await _quarantine_list_core(request, _LIVE_STORE)
+    except ApiError as exc:
+        return error_response(exc)
+    except Exception as exc:  # noqa: BLE001 — フェイルクローズ: 想定外は 500、握りつぶさない
+        logger.exception("unexpected error in skills.list_quarantine_skills: %s", exc)
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "INTERNAL_ERROR", "message": "internal error", "retryable": True}},

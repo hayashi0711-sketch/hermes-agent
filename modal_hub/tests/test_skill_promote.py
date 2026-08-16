@@ -307,6 +307,8 @@ def test_append_promote_log_extracts_session_id(tmp_path, monkeypatch):
         destination=tmp_path / "dest",
         forced=False,
         backup_path=None,
+        provenance="local-promote",
+        promoted_at_ms=1700000000000,
         base=tmp_path,
     )
 
@@ -329,6 +331,8 @@ def test_append_promote_log_null_session_id_when_absent(tmp_path, monkeypatch):
         destination=tmp_path / "dest",
         forced=False,
         backup_path=None,
+        provenance="local-promote",
+        promoted_at_ms=1700000000000,
         base=tmp_path,
     )
     record = json.loads((tmp_path / "promote_log.jsonl").read_text(encoding="utf-8").strip())
@@ -341,8 +345,23 @@ def test_append_promote_log_null_session_id_when_absent(tmp_path, monkeypatch):
 
 
 def test_run_promote_end_to_end(tmp_path, monkeypatch, quarantine):
+    import hh_agent_promote_lock as lock_mod
+
     hermes_root = tmp_path / "hermes_skills"
     monkeypatch.setattr(promote, "_hermes_skills_root", lambda: hermes_root)
+    # run_promote は S-06b の署名（receipt 生成）と共有ロックを使うため、
+    # 署名鍵はダミーへ、ロックは tmp_path へ向ける（実ホームへ触らせない）。
+    monkeypatch.setattr(
+        promote, "_load_signing_env",
+        lambda: {promote.SIGNING_KEY_VAR: "k" * 64, promote.WRITE_KEY_VAR: "w" * 64},
+    )
+    real_lock = lock_mod.promote_lock
+    monkeypatch.setattr(
+        promote, "promote_lock",
+        lambda *, base=None, timeout=60.0, nonblocking=False: real_lock(
+            base=tmp_path, timeout=timeout, nonblocking=nonblocking
+        ),
+    )
 
     content = _skill_md("e2e-skill", session_id="sess-e2e")
     quarantine.materialize("qid-e2e", "e2e-skill", content, base=tmp_path)

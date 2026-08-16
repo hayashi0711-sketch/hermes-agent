@@ -64,6 +64,19 @@
 - ``SecretMissingError``（config 由来）は ``NotifyError`` に変換せず
   そのまま上位へ伝播させる（デプロイ／Secret 設定不良は 500 系として
   routers に渡すのが正）。
+
+== Lane C（スキル同期）との共有（2026-08-16） ==
+
+``_send_with_retries`` の生 POST 部分は ``services/ntfy_client.py`` の
+``post_ntfy_once()`` へ委譲する（純粋なリファクタ。リトライ回数・
+バックオフ・``attempts`` カウント・``NTFY_TOKEN`` 省略時の Authorization
+ヘッダ非付与など、この関数の外部挙動は一切変えていない）。``ntfy_client.py``
+は ``modal`` を import しない store 非依存モジュールで、Windows の
+スケジュールタスクから動く ``scripts/hh_skill_sync.py``（Lane C の衝突通知
+``send_skill_conflict()``）が ``modal`` パッケージなしで動くために必要
+（docs/hh-agent/03_Architecture.md §14 S-11）。このファイル自体は引き続き
+``modal_hub.core.store`` に依存してよい（承認通知は Hub の Dict 状態記録が
+必須のため）。
 """
 
 from __future__ import annotations
@@ -77,6 +90,7 @@ from typing import Any, Final, Optional
 import httpx
 
 from ..core import config, store
+from . import ntfy_client
 
 logger = logging.getLogger("hh_agent.notifier")
 
@@ -241,12 +255,9 @@ def _send_with_retries(
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS) as client:
-                response = client.post(
-                    url,
-                    headers=headers,
-                    content=body.encode("utf-8"),
-                )
+            response = ntfy_client.post_ntfy_once(
+                url, headers, body.encode("utf-8"), timeout=HTTP_TIMEOUT_SECONDS
+            )
             if 200 <= response.status_code < 400:
                 logger.info(
                     "ntfy sent: approval_id=%s attempt=%d status=%d",

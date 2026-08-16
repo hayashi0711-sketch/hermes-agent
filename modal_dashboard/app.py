@@ -35,6 +35,7 @@ from pathlib import Path
 import modal
 
 from modal_dashboard import bootstrap, token_refresh
+from modal_hub.core import store
 
 _DASHBOARD_VOLUME_NAME = "hh-agent-dashboard-home"
 _DASHBOARD_MOUNT_PATH = "/opt/data"
@@ -72,6 +73,125 @@ def refresh_dashboard_agent_token():
     from modal_hub.core import store
 
     token_refresh.issue_dashboard_agent_token(Path(_DASHBOARD_MOUNT_PATH), store=store)
+
+
+@app.function(
+    image=image,
+    volumes={
+        _DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True),
+        # S-08c: Hub Volume（hh-agent-store）もマウントする。マウント先は
+        # store.VOLUME_MOUNT_PATH 定数をそのまま使う（モジュールレベルの
+        # 同一定数参照なので食い違う余地がない — タスク指示「マウント先は
+        # VOLUME_MOUNT_PATH の値と一致させること」の最強の保証）。
+        store.VOLUME_MOUNT_PATH: modal.Volume.from_name("hh-agent-store", create_if_missing=True),
+    },
+    secrets=[
+        modal.Secret.from_name(_DASHBOARD_SECRET_NAME),
+        # hh-agent-secret（HH_AGENT_TOKEN_SIGNING_KEY）は refresh
+        # 関数のみに付けるという C-3 の規約は dashboard_server に関する
+        # ものであり、同期関数には適用されない（dashboard_server は
+        # 未検証のモデル生成コマンドを実行するが、sync は決まったコード
+        # しか実行しない）。sync_dashboard_skills は Lane C のサーバー
+        # イベント ACK（C2S_SKILL_WRITE_KEY）のために Hub Secret を持つ。
+        modal.Secret.from_name(_HUB_SECRET_NAME),
+        # Lane C の読み取り鍵（CORPUS2SKILL_API_KEY）。dashboard_server が
+        # 既に使っている corpus2skill-secret をそのまま流用する（S-04:
+        # 読み取りは既存 Bearer。新たな秘密を作らない）。
+        modal.Secret.from_name(_CORPUS2SKILL_SECRET_NAME),
+    ],
+    max_containers=1,
+    schedule=modal.Period(hours=8),   # refresh_dashboard_agent_token と同じ周期
+    timeout=300,                       # S-10 確定事項 G: 1 回の実行に 5 分タイムアウト
+)
+def sync_dashboard_skills():
+    """S-10（Modal 側 pull）+ S-08c（quarantine 消し込み）を 1 つの Function で行う。
+
+    手順:
+      1. pull 部分: scripts/hh_skill_sync の `run_sync(pull=True, reconcile=False)`
+         を呼ぶ。Modal 側は push しない（S-08「Modal コンテナ上での promote・
+         push の実行は v1 では発生しない」）。USERPROFILE=/opt/data が
+         Dockerfile で既に設定済みのため、hh_skill_promote.py /
+         hh_skill_sync.py の `~/.hh-agent` 相当パスは自動的に Volume 上の
+         `/opt/data/.hh-agent` へ解決される（同期状態・outbox・receipt が
+         ダッシュボード Volume に永続化される）。
+      2. quarantine 消し込み（S-08c、設計書 1141〜1166 行目の手順 1〜5）:
+         新しい HTTP エンドポイントは増設しない。消し込みの対象は
+         **今回の pull で観測された name だけ**（消し込み済みを誤って再処理
+         しない・観測外の名前には触れない）。実測 content_sha256 が
+         Lane C 上の現在の版と一致する場合のみ `skills_quarantine_promoted/
+         <name>.<ts>/` へコピーし、mark_quarantine_resolved を呼ぶ。
+      3. 最後にダッシュボード Volume も commit する（pull 側の書き込みの
+         永続化。run_sync の Hub Volume 側 commit は store.py の
+         atomic_write_file が行う）。
+    """
+    import json
+    import logging
+    import sys
+    import time
+    from pathlib import Path as _Path
+
+    logger = logging.getLogger("hh_agent.dashboard.sync")
+
+    repo_root = _Path(__file__).resolve().parent.parent
+    for _dir in (repo_root, repo_root / "scripts"):
+        if str(_dir) not in sys.path:
+            sys.path.insert(0, str(_dir))
+    import hh_skill_sync  # noqa: PLC0415 — 関数内 import（sys.path 挿入後に必要）
+
+    # 手順1: pull 部分（Modal 側は push しない）
+    try:
+        result = hh_skill_sync.run_sync(pull=True, reconcile=False)
+    except Exception as exc:  # noqa: BLE001 — 次の周期で再試行する（S-10 確定事項 G）
+        logger.exception("sync_dashboard_skills: pull フェーズ失敗（次回再試行）: %s", exc)
+        result = {"observed": [], "remote_sha256": {}}
+
+    # 手順2: quarantine 消し込み（S-08c 手順1〜5）。store は関数内 import
+    #（store.py はモジュールトップで modal を import する — この関数の
+    #  実行環境では Volumes が既にマウント済みなので安全）。
+    from modal_hub.core import store
+
+    try:
+        store.store_volume().reload()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sync_dashboard_skills: Hub Volume reload 失敗（消し込みスキップ）: %s", exc)
+        return
+
+    observed_names = result.get("observed") or []
+    remote_sha256 = result.get("remote_sha256") or {}
+    ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime()) + f"{int(time.time() * 1000) % 1000:03d}"
+    for name in observed_names:
+        try:
+            entry = store.read_quarantine_entry_safe(name)
+            if entry is None:
+                continue  # quarantine に無い → 何もしない
+            # 実測 content_sha256 が Lane C 上の現在の版（今回 pull した or
+            # 既にローカルにある版）と一致するか。一致しなければ何も書かず
+            # 次周期へ持ち越す。
+            lane_c_sha = remote_sha256.get(name)
+            if lane_c_sha is None or entry.get("content_sha256") != lane_c_sha:
+                continue
+            dest_dir = f"skills_quarantine_promoted/{name}.{ts}"
+            store.atomic_write_file(f"{dest_dir}/SKILL.md", entry["content"].encode("utf-8"))
+            meta = {}
+            for meta_key in ("origin_instance", "published_at", "distilled_from_session_id"):
+                if entry.get(meta_key) is not None:
+                    meta[meta_key] = entry[meta_key]
+            if meta:
+                store.atomic_write_file(
+                    f"{dest_dir}/meta.json",
+                    json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            store.mark_quarantine_resolved(name, entry["content_sha256"])
+            store.store_volume().commit()
+            logger.info("sync_dashboard_skills: %s を quarantine から消し込んだ", name)
+        except Exception as exc:  # noqa: BLE001 — 1 つの失敗で以後の同期を止めない
+            logger.warning("sync_dashboard_skills: %s の quarantine 消し込み失敗（次回再試行）: %s", name, exc)
+
+    # 手順3: ダッシュボード Volume も commit する（pull 側の書き込みの永続化）
+    try:
+        modal.Volume.from_name(_DASHBOARD_VOLUME_NAME).commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sync_dashboard_skills: dashboard Volume commit 失敗: %s", exc)
 
 
 def _ensure_agent_token_seeded(hermes_home: Path) -> None:

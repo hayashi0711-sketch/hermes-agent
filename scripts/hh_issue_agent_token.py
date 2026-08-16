@@ -54,6 +54,44 @@ def _load_signing_key() -> bytes:
     raise RuntimeError(f"{SECRET_ENV_PATH} に {SIGNING_KEY_VAR} が無い")
 
 
+def _parse_secret_env_var(name: str) -> str | None:
+    """`.hh-secret.env` から `name=...` の値を1つ読む（無ければ None）。
+
+    `_load_signing_key()` と同じパース方式（KEY=VALUE 行形式、コメント行
+    スキップ、両端の引用符は剥がす）を踏襲する。SECRET_ENV_PATH が無い・
+    該当キーが無い・値が空文字の場合は None を返す（例外にしない）。
+    """
+    env_value = os.environ.get(name)
+    if env_value is not None:
+        return env_value.strip().strip('"').strip("'") or None
+    if not SECRET_ENV_PATH.is_file():
+        return None
+    for line in SECRET_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            stripped = value.strip().strip('"').strip("'")
+            return stripped or None
+    return None
+
+
+def load_ntfy_credentials() -> tuple[str | None, str | None]:
+    """`.hh-secret.env` から NTFY_TOPIC / NTFY_TOKEN を読む共通ヘルパー。
+
+    `scripts/hh_skill_sync.py`（Windowsスケジュールタスクから起動される。
+    まだ存在しないファイルだが、将来そこから import されることを想定する）
+    が再利用するため、`hh_issue_agent_token.py` 側にこのロジックを重複させず
+    1箇所にまとめる。`_load_signing_key()` と同じ `.hh-secret.env` の
+    パース方式（`SECRET_ENV_PATH` を使う）を踏襲すること。
+    未設定の場合は該当する方を None で返す（例外にしない）。
+    """
+    topic = _parse_secret_env_var("NTFY_TOPIC")
+    token = _parse_secret_env_var("NTFY_TOKEN")
+    return topic, token
+
+
 def _compute_workspace_id() -> str:
     import hashlib
     import subprocess
