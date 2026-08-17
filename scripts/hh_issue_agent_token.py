@@ -6,11 +6,14 @@
 `AGENT_TOKEN_TTL_SECONDS`）、非対話運用ではこのスクリプトを Windows タスク
 スケジューラ等で定期実行し、失効前に再発行し続ける前提で作る。
 
-発行する2本（Phase1b spec 07 §5「認証」の scopes 分離を維持する）:
-    - agent_token.json  : 承認フロー用（request/poll/claim/complete のレガシー
-                           デフォルトスコープ）
-    - distill_token.json: Skill Distiller の publish フェーズ専用
-                           （scopes=["publish"] のみ）
+発行する3本（Phase1b spec 07 §5「認証」の scopes 分離を維持する）:
+    - agent_token.json      : 承認フロー用（request/poll/claim/complete の
+                              レガシーデフォルトスコープ）
+    - distill_token.json    : Skill Distiller の publish フェーズ専用
+                              （scopes=["publish"] のみ）
+    - quarantine_read_token.json: `hh_skill_promote.py --remote <source>`
+                              （S-08b）が読み取り専用で利用する
+                              （scopes=["quarantine_read"] のみ）
 
 このスクリプトは実際に本番 Modal の hh-agent-approvals Dict へ
 agent_session レコードを書き込む。ローカルに `modal token` 認証済みで
@@ -156,8 +159,20 @@ def main() -> int:
     )
     _write_token_file(HH_AGENT_HOME / "distill_token.json", distill_token)
 
+    quarantine_read_token = security.issue_agent_token(
+        store,
+        sub="hh-skill-promote-remote",
+        source=security.SOURCE_CLAUDE_CODE,
+        session_id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        signing_key=signing_key,
+        scopes=[security.SCOPE_QUARANTINE_READ],
+        now=now,
+    )
+    _write_token_file(HH_AGENT_HOME / "quarantine_read_token.json", quarantine_read_token)
+
     exp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now + security.AGENT_TOKEN_TTL_SECONDS))
-    message = f"[hh_issue_agent_token] agent_token.json / distill_token.json を再発行しました（失効目安: {exp} ローカル時刻）"
+    message = f"[hh_issue_agent_token] agent_token.json / distill_token.json / quarantine_read_token.json を再発行しました（失効目安: {exp} ローカル時刻）"
     _log(message)
     return 0
 
