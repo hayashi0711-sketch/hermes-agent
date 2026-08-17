@@ -132,7 +132,7 @@ def sync_dashboard_skills():
 
     logger = logging.getLogger("hh_agent.dashboard.sync")
 
-    repo_root = _Path(__file__).resolve().parent.parent
+    repo_root = _Path("/opt/hermes")
     for _dir in (repo_root, repo_root / "scripts"):
         if str(_dir) not in sys.path:
             sys.path.insert(0, str(_dir))
