@@ -1591,6 +1591,23 @@ async def pwa_pair(request: Request) -> JSONResponse:
         except security.PairingCodeConsumedError as exc:
             raise ApiError(409, "PAIRING_CONSUMED", "pairing code already used", retryable=False) from exc
 
+        # 動的フロー（scripts/hh_pwa_pair.py 発行の pairing_offer 経由）でも、
+        # ここが初回の成功したペアリングなら bootstrap_key を立てる。
+        # §7.1b は「どの経路でも初回ペアリング成功と同時に静的コードを恒久
+        # 無効化する」ことを要求しており、bootstrap 判定ブロック（上の
+        # if not bootstrap_done 節）は静的コード自身の経路でしか
+        # bootstrap_key を書かない。動的コードでの初回ペアリングだけを
+        # 行った場合にこれを省くと、使われないまま残った HH_PAIRING_CODE が
+        # 恒久的に有効なまま — Secret を明示的にローテーションしない限り
+        # 有効な残存資格情報になる（Codexレビュー指摘の回帰修正）。
+        # 既に bootstrap_done なら（通常の再ペアリング）書く必要が無い。
+        # 無条件で put_if_absent を呼ぶと、no-op のはずの書き込みで一時的な
+        # StoreError を踏んだ場合に「コードは直前に消費・削除済みなのに
+        # レスポンスは500」という無関係な失敗を起こしうる（Codexレビュー
+        # 2巡目指摘・P2）。
+        if not bootstrap_done:
+            _LIVE_STORE.put_if_absent(bootstrap_key, {"used_at": now})
+
         cookie_value, sid = security.issue_pwa_session(
             _LIVE_STORE, device_name=device_name, session_key=config.pwa_session_key().encode("utf-8"), now=now
         )

@@ -1288,6 +1288,34 @@ def test_dynamic_pairing_offer_flow_after_bootstrap(client, store) -> None:
     assert resp.status_code == 200
 
 
+def test_dynamic_pairing_as_first_ever_pairing_also_closes_static_code(client, store) -> None:
+    """§7.1b 回帰テスト（Codexレビュー指摘）: 静的コードを一度も使わず、
+    動的オファー（`scripts/hh_pwa_pair.py` 相当）だけで初回ペアリングした
+    場合でも、`bootstrap_done` が立って `HH_PAIRING_CODE` が恒久的に
+    無効化されること。
+
+    修正前は bootstrap_done を書くのが静的コード経路（`if not
+    bootstrap_done and ...` ブロック）だけだったため、動的コードで初回
+    ペアリングを済ませると HH_PAIRING_CODE がその後も有効なまま残り、
+    Secret を明示的にローテーションしない限り恒久的な残存資格情報になって
+    いた。
+    """
+    from modal_hub.tests.conftest import TEST_PAIRING_CODE
+
+    assert store.data.get("bootstrap_done") is None  # 前提: まだ誰もペアリングしていない
+
+    code = security.create_pairing_offer(store)
+    resp = client.post("/api/pwa/pair", json={"code": code, "device_name": "iPhone"})
+    assert resp.status_code == 200
+    assert store.data.get("bootstrap_done") is not None
+
+    client.cookies.clear()
+    static_attempt = client.post(
+        "/api/pwa/pair", json={"code": TEST_PAIRING_CODE, "device_name": "iPad"}
+    )
+    assert static_attempt.status_code in (401, 409), "動的経路での初回ペアリング後も静的コードが有効なまま"
+
+
 def test_pairing_is_rate_limited_and_audited(client, store) -> None:
     """§7.1: IP ごと 10 回/10 分。上限超過は 429 ＋ `pairing_rate_limited` 監査。"""
     for _ in range(10):
