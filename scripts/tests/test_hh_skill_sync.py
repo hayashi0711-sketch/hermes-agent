@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import sys
 import urllib.error
 from pathlib import Path
@@ -836,6 +837,42 @@ def test_server_events_not_acked_on_notification_failure(tmp_path, env, signing_
     result = sync_mod.run_sync(pull=True, reconcile=True, base=tmp_path)
     assert result["events_seen"] == 1 and result["events_acked"] == 0
     assert len(fake_http.calls) == 1  # ACK は送られない
+
+
+def test_server_events_ntfy_env_loaded_before_send(tmp_path, env, signing_env, fake_http, monkeypatch):
+    """サーバーイベント通知の送信時点で ntfy 資格情報が注入済みであること。
+
+    `ntfy` フィクスチャは送信関数ごと fake に差し替えて環境変数チェックを
+    すり抜けるため使わない。実物の `send_skill_sync_event()` と同じ条件
+    （NTFY_TOPIC 未設定）で、送信時に `os.environ["NTFY_TOPIC"]` が
+    `.hh-secret.env` 由来の値になっていることを呼び出し時点で検証する。
+    `_ensure_ntfy_env()` がサーバーイベント処理より後にしか呼ばれない
+    修正前コードでは fail する。
+    """
+    _write_config(tmp_path)
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
+    monkeypatch.delenv("NTFY_TOKEN", raising=False)
+    # hh_skill_sync は `from hh_issue_agent_token import load_ntfy_credentials`
+    # で束縛しているため、`_ensure_ntfy_env()` が実際に呼ぶ binding 側を差し替える
+    monkeypatch.setattr(sync_mod, "load_ntfy_credentials", lambda: ("test-topic", "test-token"))
+    env_at_call: list = []
+
+    def _fake_send_skill_sync_event(event: dict) -> str:
+        # 呼び出し時点で注入済みであることをここで検証する
+        assert os.environ.get("NTFY_TOPIC") == "test-topic"
+        assert os.environ.get("NTFY_TOKEN") == "test-token"
+        env_at_call.append(os.environ.get("NTFY_TOPIC"))
+        return "sent"
+
+    monkeypatch.setattr(ntfy_client, "send_skill_sync_event", _fake_send_skill_sync_event)
+    payload = {"skills": [], "events": [{"event_id": "e1", "name": "alpha", "type": "publish"}], "next_cursor": None}
+    fake_http.script.append((200, _list_json(payload)))
+    fake_http.script.append((200, b"{}"))  # ack 応答
+
+    result = sync_mod.run_sync(pull=True, reconcile=False, base=tmp_path)
+
+    assert env_at_call == ["test-topic"]  # 送信が実際に行われ、注入済みだった
+    assert result["events_seen"] == 1 and result["events_acked"] == 1
 
 
 def test_metadata_repair_updates_state_only(tmp_path, env, signing_env, fake_http, ntfy, monkeypatch):

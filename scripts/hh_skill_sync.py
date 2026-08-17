@@ -1055,6 +1055,11 @@ def run_sync(*, pull: bool, reconcile: bool, dry_run: bool = False, base: Option
         result["config_present"] = False
         print("[hh_skill_sync] WARN: Lane C の読み取り鍵が無いため同期しない", file=sys.stderr)
         return result
+    # サーバーイベント通知（S-11）は flush_outbox() を経由しないため、ntfy
+    # 資格情報はここで先に注入しておく。注入が無いと send_skill_sync_event()
+    # が NTFY_TOPIC を取得できず、サーバーイベントの通知が必ず失敗して
+    # ACK も進まない（flush_outbox() 内の既存呼び出しは冪等なので残す）。
+    _ensure_ntfy_env()
     verify_keys = load_verify_keys()
     denylist = load_denylist(base=base)
     sync_state = load_sync_state(base=base)
