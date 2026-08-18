@@ -16,7 +16,7 @@
      しない URL を常に 404 でキャッシュ・照合していた。
    ===================================================================== */
 
-const CACHE_VERSION = "v5";
+const CACHE_VERSION = "v6";
 const STATIC_CACHE = "hh-pwa-static-" + CACHE_VERSION;
 
 // キャッシュしてよい静的アセットの固定リスト。main.py が実際に登録して

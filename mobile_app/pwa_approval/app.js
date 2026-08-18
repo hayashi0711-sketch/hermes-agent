@@ -657,8 +657,18 @@
     $("pair-error").textContent = "";
     $("pair-code").value = "";
     $("pair-device").value = "";
+    // pair-submit は type="button"（type="submit" ではない）。ネイティブの
+    // required バリデーションが submit イベント自体を無言でブロックし、
+    // タップが完全に無反応に見える事象が実機（iOS Safari / Chrome for iOS
+    // 双方）で確認されたための意図的な変更 (2026-08-19)。クリックへ明示的に
+    // バインドし、検証は onPairSubmit() 内で行い必ず画面にエラーを出す。
+    $("pair-submit").onclick = onPairSubmit;
+    // Enter キー等による暗黙のフォーム送信も同じ経路へ寄せる（保険）。
     const form = $("pair-form");
-    form.onsubmit = onPairSubmit;
+    form.onsubmit = function (ev) {
+      ev.preventDefault();
+      onPairSubmit();
+    };
   }
 
   // 全角数字 (U+FF10-FF19) を半角へ正規化する。日本語キーボードでは
@@ -671,12 +681,17 @@
     });
   }
 
-  async function onPairSubmit(ev) {
-    ev.preventDefault();
+  async function onPairSubmit() {
     const code = normalizeDigits($("pair-code").value.trim());
     const device = $("pair-device").value.trim();
     if (!/^\d{8}$/.test(code)) {
       showPairError("PAIRING_INVALID");
+      return;
+    }
+    if (!device) {
+      // type="button" 化で HTML5 required バリデーションに頼らなくなった分、
+      // ここで明示的にチェックして必ず画面にエラーを出す。
+      showPairErrorRaw("端末名を入力してください");
       return;
     }
     const submit = $("pair-submit");
