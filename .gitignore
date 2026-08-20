@@ -25,6 +25,10 @@ act/
 .env.production.local
 .env.development
 .env.test
+# H-H-Agent シークレット/署名鍵ファイルとそのバックアップ（.hh-secret.env.bak.<timestamp>
+# 等）。従来 .git/info/exclude（ローカル限定）でのみ保護されており、.gitignore
+# には無かった（Codexレビュー P1 指摘、2026-08-20 で発覚・対応）。
+.hh-*.env*
 .hermes-docker/
 .notebooklm-home/
 .notebooklm-cli-venv/

@@ -138,6 +138,13 @@ SCOPE_PUBLISH = "publish"
 #: エージェントトークン + scopes 機構を再利用。新規 Secret は作らない）。
 SCOPE_QUARANTINE_READ = "quarantine_read"
 
+#: `POST /api/dispatch/headless` を呼べるスコープ名（Agentic_OS ヘッドレス
+#: ディスパッチ。.agentic_os_headless_dispatch_task.md）。既存のエージェント
+#: トークン + scopes 機構を再利用し、署名鍵は AGENTIC_OS_DISPATCH_KEY
+#: （config.py）に分離する。_LEGACY_DEFAULT_SCOPES に含めないことで、
+#: Phase 1a 以前に発行されたトークンでは dispatch を呼べない（fail-closed）。
+SCOPE_DISPATCH = "dispatch"
+
 #: PWA セッション Cookie の有効期限（Phase1a spec §7.2「exp は発行から30日」）。
 PWA_SESSION_TTL_SECONDS = 30 * 24 * 3600
 
@@ -1137,6 +1144,7 @@ __all__ = [
     "PAIRING_CODE_LENGTH",
     "SCOPE_PUBLISH",
     "SCOPE_QUARANTINE_READ",
+    "SCOPE_DISPATCH",
     # 例外
     "SecurityError",
     "InvalidCredentialError",

@@ -219,6 +219,7 @@ def test_verify_required_routes_passes_when_everything_is_registered() -> None:
     app = FastAPI()
     hub_main._include_approval_router(app)
     hub_main._include_skills_router(app)  # Phase 1b: 必須集合に skills も入った
+    hub_main._include_dispatch_router(app)  # Agentic_OS: 必須集合に dispatch も入った
     hub_main._verify_required_routes(app)  # 例外を投げないこと
 
 
@@ -356,15 +357,28 @@ def test_forbidden_existing_resources_are_never_referenced() -> None:
         "jarvis-backend",
         "corpus2skill",
     ]
-    memory_bridge_exempt = {"corpus2skill"}
+    # corpus2skill という語だけは正当に参照する3ファイル:
+    #   - memory_bridge.py: 親設計書 §4.7 が既存 Corpus2Skill の MCP サーバーを
+    #     読み取り専用で叩くクライアントと明記（既存の例外）。
+    #   - routers/dispatch.py: .agentic_os_headless_dispatch_task.md が一時
+    #     config.yaml へ `memory.provider: corpus2skill` を書くことを要求しており、
+    #     これは hermes のメモリプラグイン名（.hermes/plugins/corpus2skill/）であって
+    #     Modal リソース識別子ではない。c2s-skills-store / c2s-secret のような
+    #     実際のリソース識別子は dispatch.py でも引き続き禁止のまま。
+    #   - main.py: Modal Image ビルドでプラグインディレクトリ
+    #     `.hermes/plugins/corpus2skill/` をコンテナへ add_local_dir するため、
+    #     dispatch.py と同じ理由で例外（実リソース識別子は引き続き禁止）。
+    corpus2skill_exempt = {"memory_bridge.py", "dispatch.py", "main.py"}
     root = Path(inspect.getfile(hub_main)).resolve().parents[1]
     for path in sorted((root / "modal_hub").rglob("*.py")) + sorted((root / "hh_hooks").glob("*.py")):
         if "tests" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
         applicable = forbidden
-        if path.name == "memory_bridge.py":
-            applicable = [name for name in forbidden if name not in memory_bridge_exempt]
+        if path.name in corpus2skill_exempt:
+            # この3ファイルに限り禁止語 corpus2skill だけ除外する
+            # （ファイル名ではなく語単位で除外することに注意）。
+            applicable = [name for name in forbidden if name != "corpus2skill"]
         hits = [name for name in applicable if name in text]
         assert hits == [], f"{path.name} が既存リソース {hits} を参照している"
 

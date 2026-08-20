@@ -44,6 +44,14 @@ NTFY_TOPIC: Final = "NTFY_TOPIC"
 NTFY_TOKEN: Final = "NTFY_TOKEN"
 ANTHROPIC_API_KEY: Final = "ANTHROPIC_API_KEY"
 C2S_API_KEY: Final = "C2S_API_KEY"
+# Agentic_OS ヘッドレスディスパッチ（.agentic_os_headless_dispatch_task.md）。
+# 既存のエージェントトークン機構（security.verify_agent_token）を再利用するが、
+# 署名鍵の名前空間だけは既存（HH_AGENT_TOKEN_SIGNING_KEY）と衝突しない新規名にする。
+AGENTIC_OS_DISPATCH_KEY: Final = "AGENTIC_OS_DISPATCH_KEY"
+# 任意: 一時 HERMES_HOME の config.yaml へ model.default として書くモデル名
+# （未設定なら hermes 側の既定モデル解決に委ねる。routers/dispatch.py の
+# _prepare_hermes_home 参照）。
+AGENTIC_OS_DISPATCH_MODEL: Final = "AGENTIC_OS_DISPATCH_MODEL"
 
 # Required at function-call time. The container fails closed if any of
 # these is unset when the function runs.
@@ -68,6 +76,8 @@ _OPTIONAL_KEYS: Final = (
     NTFY_TOKEN,
     ANTHROPIC_API_KEY,
     C2S_API_KEY,
+    AGENTIC_OS_DISPATCH_KEY,
+    AGENTIC_OS_DISPATCH_MODEL,
 )
 
 # Public aggregate, mainly for startup self-diagnostics (see design doc §4.4
@@ -218,6 +228,27 @@ def c2s_api_key() -> Optional[str]:
     return get_optional(C2S_API_KEY)
 
 
+def agentic_os_dispatch_key() -> Optional[str]:
+    """Agentic_OS ヘッドレスディスパッチ用エージェントトークンの HMAC 署名鍵。
+
+    Optional（2026-08-20 追加）: 未設定でも Hub は起動するが、
+    `POST /api/dispatch/headless` のトークン検証は 401 で fail-closed になる。
+    既存デプロイの起動を壊さないよう _REQUIRED_KEYS には加えない
+    （_verify_required_secrets は起動を HubStartupError で止めるため）。
+    """
+    return get_optional(AGENTIC_OS_DISPATCH_KEY)
+
+
+def agentic_os_dispatch_model() -> Optional[str]:
+    """一時 HERMES_HOME の config.yaml に書く推論モデル名（任意）。
+
+    Optional: 未設定なら hermes 側の既定モデル解決（プロバイダー既定）に委ねる。
+    推論モデルを固定したい場合はこの Secret にモデル名
+    （例: anthropic/claude-sonnet-4-6）を設定する。
+    """
+    return get_optional(AGENTIC_OS_DISPATCH_MODEL)
+
+
 # ---------------------------------------------------------------------------
 # __all__
 # ---------------------------------------------------------------------------
@@ -232,6 +263,8 @@ __all__ = [
     "NTFY_TOKEN",
     "ANTHROPIC_API_KEY",
     "C2S_API_KEY",
+    "AGENTIC_OS_DISPATCH_KEY",
+    "AGENTIC_OS_DISPATCH_MODEL",
     "ALL_SECRET_KEYS",
     # Errors
     "SecretMissingError",
@@ -249,4 +282,6 @@ __all__ = [
     "ntfy_token",
     "anthropic_api_key",
     "c2s_api_key",
+    "agentic_os_dispatch_key",
+    "agentic_os_dispatch_model",
 ]

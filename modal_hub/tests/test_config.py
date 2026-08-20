@@ -14,7 +14,7 @@ from modal_hub.core import config
 
 
 def test_all_design_doc_secret_keys_are_declared() -> None:
-    """親設計書 §6 の表と 1 対 1。"""
+    """親設計書 §6 の表と 1 対 1（dispatch タスク追加分のみ §6 外の追記）。"""
     assert set(config.ALL_SECRET_KEYS) == {
         "HH_AGENT_TOKEN_SIGNING_KEY",
         "HH_AGENT_TOKEN_SIGNING_KEY_PREV",
@@ -24,6 +24,10 @@ def test_all_design_doc_secret_keys_are_declared() -> None:
         "NTFY_TOKEN",
         "ANTHROPIC_API_KEY",
         "C2S_API_KEY",
+        # 以下は .agentic_os_headless_dispatch_task.md の指示で追加した
+        # optional キー（§6 の表には無い。未設定でも既存デプロイは起動する）。
+        "AGENTIC_OS_DISPATCH_KEY",
+        "AGENTIC_OS_DISPATCH_MODEL",
     }
 
 
