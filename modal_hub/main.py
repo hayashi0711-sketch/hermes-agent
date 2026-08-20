@@ -626,3 +626,14 @@ _ = Any
 # "issue_dispatch_token")` が解決できず、Hub Backend からの呼び出しが 404 相当に
 # なる）。routers/ の既存ルートは一切変更しない。
 from modal_hub import dispatch_token as _dispatch_token  # noqa: F401,E402
+
+
+# Agentic_OS 承認オラクル用トークン発行経路
+# （.agentic_os_issue_approval_token_task.md / Agentic_OS/03_Architecture.md §7 B7）:
+# `approval_token.issue_approval_agent_token` はこの `app` に @app.function() 登録
+# される Modal Function（公開 HTTP エンドポイントではない）。`modal deploy
+# modal_hub.main` の際にこの import が @app.function() を実行させ関数を app へ
+# 登録する（import しないと `modal.Function.from_name("hh-agent-hub",
+# "issue_approval_agent_token")` が解決できず、Hub Backend からの呼び出しが
+# 404 相当になる）。routers/ の既存ルートは一切変更しない。
+from modal_hub import approval_token as _approval_token  # noqa: F401,E402
