@@ -62,13 +62,11 @@ import logging
 
 import modal
 
+import hashlib
+
 from modal_hub.core import config
 from modal_hub.core import security
-from modal_hub.dispatch_token import (
-    SOURCE_AGENTIC_OS,
-    WORKSPACE_AGENTIC_OS,
-    _LiveTokenStore,
-)
+from modal_hub.core import store
 from modal_hub.main import (
     _SECRET_NAME,
     _STORE_MOUNT_PATH,
@@ -76,6 +74,41 @@ from modal_hub.main import (
     app,
     image,
 )
+
+# SOURCE_AGENTIC_OS / WORKSPACE_AGENTIC_OS / _LiveTokenStore は dispatch_token.py
+# と同じ値・同じ実装だが、そこから import せずここで独立に定義する（2026-08-21、
+# 本番デプロイで発覚した修正）。main.py がモジュール末尾で
+# `from modal_hub import dispatch_token` の直後に `from modal_hub import
+# approval_token` を実行する構成だと、`modal deploy modal_hub/main.py` の
+# 実行方式（ファイルを直接ロードするため modal_hub.main が __main__ とは別に
+# 再importされうる）のもとで dispatch_token モジュールが「初期化途中」のまま
+# approval_token から参照され、
+# `ImportError: cannot import name 'SOURCE_AGENTIC_OS' from partially
+# initialized module 'modal_hub.dispatch_token' (most likely due to a
+# circular import)` で本番デプロイが失敗した。値は単純な定数・薄いラッパー
+# クラスのため、importで共有せず複製することで循環参照そのものを断つ。
+
+#: dispatch_token.py の SOURCE_AGENTIC_OS と同一値（Agentic_OS Hubからの
+#: トークン発行という同一の主体性を、dispatch用途・approval用途の両方で
+#: 一致させる必要があるため。approval_gate._check_agent_ownership は
+#: source/session_id/workspace_id の完全一致で所有権を判定する）。
+SOURCE_AGENTIC_OS = security.SOURCE_CLAUDE_CODE
+
+#: dispatch_token.py の WORKSPACE_AGENTIC_OS と同一値（sha256("agentic_os")）。
+WORKSPACE_AGENTIC_OS = hashlib.sha256(b"agentic_os").hexdigest()
+
+
+class _LiveTokenStore:
+    """`security.CredentialStore` の本番アダプタ（dispatch_token.py と同型・複製）。"""
+
+    def get(self, key: str):
+        return store.get(key)
+
+    def put_if_absent(self, key: str, value) -> bool:
+        return store.put_if_absent(key, value)
+
+    def delete(self, key: str) -> None:
+        store.delete(key)
 
 logger = logging.getLogger("hh_agent.approval_token")
 
