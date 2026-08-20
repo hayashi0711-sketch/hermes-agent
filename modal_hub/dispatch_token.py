@@ -159,7 +159,15 @@ def _issue_dispatch_token_core(
 
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name(_SECRET_NAME)],
+    # AGENTIC_OS_DISPATCH_KEY は既存の hh-agent-secret には含まれておらず（本番未設定
+    # のためfail-closedだった。03_Architecture.md §7.1参照）、hh-agent-secret を
+    # 無理に上書き・再作成すると既存キー（HH_AGENT_TOKEN_SIGNING_KEY等）を消しかねない
+    # ため、新規の独立したSecret agentic-os-dispatch-secret へ分離する（2026-08-21、
+    # 本番反映時に追加）。
+    secrets=[
+        modal.Secret.from_name(_SECRET_NAME),
+        modal.Secret.from_name("agentic-os-dispatch-secret"),
+    ],
     volumes={
         _STORE_MOUNT_PATH: modal.Volume.from_name(
             _STORE_VOLUME_NAME, create_if_missing=True
