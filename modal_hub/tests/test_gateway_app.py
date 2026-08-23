@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from hermes_cli.telegram_managed_bot import TelegramPairing
+from hermes_cli.telegram_managed_bot import TelegramBotSetupResult
 from modal_hub.gateway_app import (
     _DASHBOARD_MOUNT_PATH,
     _DASHBOARD_VOLUME_NAME,
@@ -54,29 +54,27 @@ async def test_run_telegram_gateway_forever_propagates_exceptions():
             await run_telegram_gateway_forever()
 
 
-def test_pair_telegram_cli_returns_deep_link():
-    """ペアリング開始APIを呼び、ユーザーに提示するディープリンク文字列を返すこと。"""
-    fake_pairing = TelegramPairing(
-        pairing_id="pair-1",
-        poll_token="poll-token-1",
-        suggested_username="hermes_abc_bot",
-        deep_link="https://t.me/newbot/HermesAgentBot/hermes_abc_bot",
-        qr_payload="https://t.me/newbot/HermesAgentBot/hermes_abc_bot",
+def test_pair_telegram_cli_returns_setup_result():
+    """ペアリング作成→承認待ちポーリング→トークン取得までを行い、結果を返すこと。"""
+    fake_result = TelegramBotSetupResult(
+        token="123456:ABCdefGHIjklMNOpqrSTUvwxYZ-1234567890",
+        bot_username="hermes_abc_bot",
+        owner_user_id=987654321,
     )
     with patch(
-        "modal_hub.gateway_app.create_pairing", return_value=fake_pairing
-    ) as mock_pair:
+        "modal_hub.gateway_app.auto_setup_telegram_bot_result", return_value=fake_result
+    ) as mock_setup:
         result = pair_telegram_cli()
-    mock_pair.assert_called_once()
-    assert isinstance(result, str)
-    assert len(result) > 0
+    mock_setup.assert_called_once()
+    assert result is fake_result
+    assert result.token == fake_result.token
 
 
 def test_pair_telegram_cli_raises_when_pairing_unavailable():
-    """create_pairing が None を返したら黙らず明示的なエラーにする
-    （feedback_silent_empty_fallback_hides_bugs と同種の教訓: create_pairing は
-    ネットワーク失敗やAPI拒否時に None を返す仕様のため、None.deep_link で
-    AttributeError になるような暗黙の失敗を避ける）。"""
-    with patch("modal_hub.gateway_app.create_pairing", return_value=None):
+    """auto_setup_telegram_bot_result が None を返したら黙らず明示的なエラーにする
+    （feedback_silent_empty_fallback_hides_bugs と同種の教訓: オンボーディングAPI
+    への到達失敗・承認タイムアウトのどちらでも None が返る仕様のため、
+    None.token で AttributeError になるような暗黙の失敗を避ける）。"""
+    with patch("modal_hub.gateway_app.auto_setup_telegram_bot_result", return_value=None):
         with pytest.raises(RuntimeError, match="pairing"):
             pair_telegram_cli()

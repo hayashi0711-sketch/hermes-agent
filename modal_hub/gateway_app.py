@@ -17,7 +17,7 @@ from pathlib import Path
 import modal
 
 from gateway.run import start_gateway
-from hermes_cli.telegram_managed_bot import TelegramPairing, create_pairing
+from hermes_cli.telegram_managed_bot import TelegramBotSetupResult, auto_setup_telegram_bot_result
 
 _DASHBOARD_VOLUME_NAME = "hh-agent-dashboard-home"
 _DASHBOARD_MOUNT_PATH = "/opt/data"
@@ -52,38 +52,65 @@ async def run_gateway() -> None:
     await run_telegram_gateway_forever()
 
 
-def pair_telegram_cli() -> str:
-    """Telegramペアリングを開始し、ユーザーがTelegramアプリで承認するための
-    ディープリンクを返す。ユーザーが自分でリンクを開いて承認するまで、
-    このコマンドはコード側では何もトークンを保持・送信しない
-    （docs/hh-agent/09_Telegram_Bot_Upstream_Merge_Design.md
-    「外部サービス接続（課金リスク）に関する運用」節）。
+def pair_telegram_cli() -> TelegramBotSetupResult:
+    """Telegramペアリングを開始し、ディープリンク表示→ユーザーの承認待ちポーリング→
+    トークン取得までを1回のリモート実行内で完結させる。
+
+    2026-08-23修正: 当初はディープリンクを返すだけで、ユーザーが承認した後の
+    トークン取得・`.env`への保存を一切していなかった（設計・実装計画の抜け）。
+    ユーザーがTelegram側で「Create a BOT」を押しても何も起きないように見える
+    バグの原因だった。`auto_setup_telegram_bot_result()`（`hermes setup`の
+    Telegram自動セットアップが実際に使っている関数）へ差し替え、ペアリング作成
+    →ディープリンク表示→最大180秒のポーリング→トークン取得までを1呼び出しで
+    行うようにした。
     """
-    pairing: TelegramPairing | None = create_pairing()
-    if pairing is None:
-        # create_pairing はネットワーク失敗・API拒否時に None を返す仕様。
-        # None.deep_link で AttributeError になる暗黙の失敗を避け、明示的に
-        # 失敗させる（feedback_silent_empty_fallback_hides_bugs）。
+    result = auto_setup_telegram_bot_result()
+    if result is None:
+        # オンボーディングAPIへ到達できない、またはユーザーが確認しないまま
+        # タイムアウトした場合。None.token で AttributeError になる暗黙の失敗を
+        # 避け、明示的に失敗させる（feedback_silent_empty_fallback_hides_bugs）。
         raise RuntimeError(
-            "Telegram pairing could not be started: onboarding API unreachable "
-            "or rejected the request"
+            "Telegram pairing did not complete: onboarding API unreachable, "
+            "the request was rejected, or the 180-second approval window expired "
+            "(re-run this command to get a fresh link)"
         )
-    return pairing.deep_link
+    return result
 
 
 @app.function(
     image=image,
     volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
     secrets=[modal.Secret.from_name(_HUB_SECRET_NAME)],
+    timeout=240,
 )
-def _pair_telegram_remote() -> str:
-    return pair_telegram_cli()
+def _pair_telegram_remote() -> dict:
+    from hermes_cli.config import save_env_value
+
+    result = pair_telegram_cli()
+    save_env_value("TELEGRAM_BOT_TOKEN", result.token)
+    allowed_user = None
+    if result.owner_user_id:
+        allowed_user = str(result.owner_user_id)
+        save_env_value("TELEGRAM_ALLOWED_USERS", allowed_user)
+    return {
+        "bot_username": result.bot_username,
+        "allowed_user": allowed_user,
+    }
 
 
 @app.local_entrypoint()
 def pair_telegram() -> None:
     """`modal run modal_hub/gateway_app.py::pair_telegram` で1回だけ手動実行する。
-    出力されたディープリンクをユーザーがTelegramアプリで開いて承認する。
+    表示されたディープリンクをTelegramアプリで開いて「Create a BOT」で承認すると、
+    このコマンド自身が承認完了を検知してトークンを`.env`へ保存する（最大180秒待機）。
+    保存後、常駐App（run_gateway）が新しいトークンを読み込むには再デプロイ
+    （`modal deploy modal_hub/gateway_app.py`）が必要（既存コンテナはVolumeの
+    変更を自動では読み直さないため）。
     """
-    link = _pair_telegram_remote.remote()
-    print(f"Telegramで以下のリンクを開いて承認してください:\n{link}")
+    result = _pair_telegram_remote.remote()
+    print(f"✓ Telegram Bot作成完了: @{result['bot_username']}")
+    if result["allowed_user"]:
+        print(f"✓ 許可ユーザーを設定: {result['allowed_user']}")
+    else:
+        print("⚠️ 許可ユーザーIDを自動検出できませんでした。誰でもこのBotを使える状態です。")
+    print("次: `modal deploy modal_hub/gateway_app.py` を再実行し、常駐Appへ新しいトークンを反映してください。")
