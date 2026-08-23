@@ -194,6 +194,25 @@ def sync_dashboard_skills():
         logger.warning("sync_dashboard_skills: dashboard Volume commit 失敗: %s", exc)
 
 
+@app.function(
+    image=image,
+    volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
+    secrets=[modal.Secret.from_name(_DASHBOARD_SECRET_NAME)],
+    timeout=310,  # profile_oneshot.py 側の既定タイムアウト(300秒)に余裕を持たせる
+)
+def run_profile_oneshot(profile: str, prompt: str) -> dict:
+    """Agentic OS HubのProfile Agent機能から、実プロフィールに対して1回だけ
+    プロンプトを実行し応答を返す（R-2の完全ステートレス設計とは無関係な
+    別経路。永続Volumeの実プロフィールに対して実行する点が
+    hh-agent-dispatchとの違い）。
+    """
+    from pathlib import Path as _Path
+
+    from modal_dashboard.profile_oneshot import run_profile_oneshot_sync
+
+    return run_profile_oneshot_sync(profile, prompt, _Path(_DASHBOARD_MOUNT_PATH))
+
+
 def _ensure_agent_token_seeded(hermes_home: Path) -> None:
     """First-boot only: mint a token via a remote call if none exists yet.
 
