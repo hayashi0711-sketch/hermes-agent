@@ -17,6 +17,7 @@ from pathlib import Path
 import modal
 
 from gateway.run import start_gateway
+from hermes_cli.telegram_managed_bot import TelegramPairing, create_pairing
 
 _DASHBOARD_VOLUME_NAME = "hh-agent-dashboard-home"
 _DASHBOARD_MOUNT_PATH = "/opt/data"
@@ -49,3 +50,40 @@ async def run_telegram_gateway_forever() -> None:
 )
 async def run_gateway() -> None:
     await run_telegram_gateway_forever()
+
+
+def pair_telegram_cli() -> str:
+    """Telegramペアリングを開始し、ユーザーがTelegramアプリで承認するための
+    ディープリンクを返す。ユーザーが自分でリンクを開いて承認するまで、
+    このコマンドはコード側では何もトークンを保持・送信しない
+    （docs/hh-agent/09_Telegram_Bot_Upstream_Merge_Design.md
+    「外部サービス接続（課金リスク）に関する運用」節）。
+    """
+    pairing: TelegramPairing | None = create_pairing()
+    if pairing is None:
+        # create_pairing はネットワーク失敗・API拒否時に None を返す仕様。
+        # None.deep_link で AttributeError になる暗黙の失敗を避け、明示的に
+        # 失敗させる（feedback_silent_empty_fallback_hides_bugs）。
+        raise RuntimeError(
+            "Telegram pairing could not be started: onboarding API unreachable "
+            "or rejected the request"
+        )
+    return pairing.deep_link
+
+
+@app.function(
+    image=image,
+    volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
+    secrets=[modal.Secret.from_name(_HUB_SECRET_NAME)],
+)
+def _pair_telegram_remote() -> str:
+    return pair_telegram_cli()
+
+
+@app.local_entrypoint()
+def pair_telegram() -> None:
+    """`modal run modal_hub/gateway_app.py::pair_telegram` で1回だけ手動実行する。
+    出力されたディープリンクをユーザーがTelegramアプリで開いて承認する。
+    """
+    link = _pair_telegram_remote.remote()
+    print(f"Telegramで以下のリンクを開いて承認してください:\n{link}")

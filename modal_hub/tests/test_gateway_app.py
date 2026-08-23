@@ -13,10 +13,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from hermes_cli.telegram_managed_bot import TelegramPairing
 from modal_hub.gateway_app import (
     _DASHBOARD_MOUNT_PATH,
     _DASHBOARD_VOLUME_NAME,
     _HUB_SECRET_NAME,
+    pair_telegram_cli,
     run_telegram_gateway_forever,
 )
 
@@ -50,3 +52,31 @@ async def test_run_telegram_gateway_forever_propagates_exceptions():
         mock_start.side_effect = RuntimeError("relay connection refused")
         with pytest.raises(RuntimeError, match="relay connection refused"):
             await run_telegram_gateway_forever()
+
+
+def test_pair_telegram_cli_returns_deep_link():
+    """ペアリング開始APIを呼び、ユーザーに提示するディープリンク文字列を返すこと。"""
+    fake_pairing = TelegramPairing(
+        pairing_id="pair-1",
+        poll_token="poll-token-1",
+        suggested_username="hermes_abc_bot",
+        deep_link="https://t.me/newbot/HermesAgentBot/hermes_abc_bot",
+        qr_payload="https://t.me/newbot/HermesAgentBot/hermes_abc_bot",
+    )
+    with patch(
+        "modal_hub.gateway_app.create_pairing", return_value=fake_pairing
+    ) as mock_pair:
+        result = pair_telegram_cli()
+    mock_pair.assert_called_once()
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_pair_telegram_cli_raises_when_pairing_unavailable():
+    """create_pairing が None を返したら黙らず明示的なエラーにする
+    （feedback_silent_empty_fallback_hides_bugs と同種の教訓: create_pairing は
+    ネットワーク失敗やAPI拒否時に None を返す仕様のため、None.deep_link で
+    AttributeError になるような暗黙の失敗を避ける）。"""
+    with patch("modal_hub.gateway_app.create_pairing", return_value=None):
+        with pytest.raises(RuntimeError, match="pairing"):
+            pair_telegram_cli()
