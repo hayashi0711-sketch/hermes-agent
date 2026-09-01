@@ -39,6 +39,8 @@ import logging
 import os
 import queue
 import threading
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -63,16 +65,26 @@ logger = logging.getLogger(__name__)
 
 _ENV_API_KEY = "CORPUS2SKILL_API_KEY"
 _DEFAULT_BASE_URL = "https://hayashi0711--corpus2skill-serve.modal.run"
-_DEFAULT_TIMEOUT_SECONDS = 5.0
+# Grand design 2026-09-01 (08_Architecture_Design.md §3, T1.2 / D2): 5s ->
+# 15s. Modal cold starts routinely exceed 5s (observed 8/30 and 9/1:
+# prefetch warnings while a direct curl right after returned 200). Explicit
+# corpus2skill_search / journal_write calls now tolerate a cold start.
+# NOTE: this does NOT govern prefetch(), which keeps its own tighter
+# deadline budget below to stay under MemoryManager's 8s external-prefetch
+# abandonment window.
+_DEFAULT_TIMEOUT_SECONDS = 15.0
 _DEFAULT_SEARCH_LIMIT = 10
 _CONFIG_FILENAME = "corpus2skill.json"
-# Codex review (2026-08-15, Medium): prefetch() calls Lane A then Lane B
-# sequentially. At the default 5.0s timeout each, an unreachable/slow
-# backend could occupy prefetch for ~10s, but MemoryManager abandons
-# external prefetch after 8s -- so the fail-soft *exception* handling never
-# even runs; the turn just stalls near the framework's own timeout instead.
-# A tighter per-call budget keeps the sequential worst case safely under 8s.
-_PREFETCH_TIMEOUT_SECONDS = 3.0
+# Grand design 2026-09-01 (§3.3, D2): prefetch() runs under a TOTAL 7.0s
+# deadline (MemoryManager abandons external prefetch after 8s, so a genuine
+# cold start must never stall the turn past that window). Each lane attempt
+# is capped at 4.0s, and connection-class errors (URLError / TimeoutError /
+# HTTP 502-503-504) get exactly ONE retry within the remaining budget — the
+# Modal cold-start rescue. Explicit tool/journal calls are NOT governed by
+# this budget; they use _DEFAULT_TIMEOUT_SECONDS (15s) instead.
+_PREFETCH_BUDGET_SECONDS = 7.0
+_PREFETCH_LANE_TIMEOUT_SECONDS = 4.0
+_PREFETCH_HEALTH_TIMEOUT_SECONDS = 2.0
 
 # get_secret() (agent/secret_scope.py) resolves an env var honoring Hermes'
 # per-profile secret scoping (multiplexed gateway sessions, etc.), which is
@@ -132,6 +144,22 @@ def _load_config(hermes_home: str) -> dict:
 def _resolve_base_url(config: dict) -> str:
     raw = str((config or {}).get("base_url") or "").strip()
     return (raw or _DEFAULT_BASE_URL).rstrip("/") or _DEFAULT_BASE_URL
+
+
+def _is_retryable_prefetch_error(exc: BaseException) -> bool:
+    """Connection-class failures worth one cold-start retry.
+
+    Modal cold starts surface as exactly these errors: URLError covers DNS
+    failures / refused / reset connections, TimeoutError covers connect and
+    read timeouts (``socket.timeout`` is a TimeoutError alias on 3.10+),
+    and HTTP 502/503/504 are the proxy/cold-start window. Everything else
+    (4xx, malformed JSON, ...) is permanent and must not burn budget.
+    Note: ``urllib.error.HTTPError`` subclasses ``URLError``, so HTTPError
+    must be checked first or 4xx would wrongly count as retryable.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (502, 503, 504)
+    return isinstance(exc, (urllib.error.URLError, TimeoutError))
 
 
 # ---------------------------------------------------------------------------
@@ -220,19 +248,29 @@ class _Corpus2SkillClient:
         }
 
     def _request(self, method: str, path: str, *, params: Optional[dict] = None,
-                 payload: Optional[dict] = None, timeout: Optional[float] = None) -> dict:
+                 payload: Optional[dict] = None, timeout: Optional[float] = None,
+                 auth: bool = True) -> dict:
         url = f"{self._base_url}{path}"
         if params:
             query = urlencode({k: v for k, v in params.items() if v not in (None, "")})
             if query:
                 url = f"{url}?{query}"
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method=method)
+        headers = self._headers() if auth else {"Accept": "application/json"}
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         with urllib.request.urlopen(req, timeout=timeout if timeout is not None else self._timeout) as resp:
             body = resp.read()
         if not body:
             return {}
         return json.loads(body.decode("utf-8"))
+
+    def health(self, *, timeout: Optional[float] = None) -> dict:
+        """Unauthenticated liveness probe: GET /health (warm/cold diagnostic).
+
+        Called only after a total prefetch failure to tell a Modal cold
+        start (backend warming up) apart from a hard outage in the logs.
+        """
+        return self._request("GET", "/health", timeout=timeout, auth=False)
 
     def search(self, query: str, limit: int = _DEFAULT_SEARCH_LIMIT, *, timeout: Optional[float] = None) -> dict:
         """Lane A (classified long-term memory): GET /api/search."""
@@ -353,30 +391,121 @@ class Corpus2SkillMemoryProvider(MemoryProvider):
             return ""
         sid = session_id or self._session_id
         sections: List[str] = []
+        # Grand design 2026-09-01 (§3.3, D2): total 7.0s deadline shared by
+        # both lanes AND the health probe. MemoryManager abandons external
+        # prefetch after 8s, so this method must never exceed the deadline —
+        # remaining <= 0 skips a lane rather than stalling the turn.
+        start = time.monotonic()
+        deadline = start + _PREFETCH_BUDGET_SECONDS
 
-        try:
-            lane_a = self._client.search(
-                query, limit=_DEFAULT_SEARCH_LIMIT, timeout=_PREFETCH_TIMEOUT_SECONDS
-            )
-            text = _format_results(lane_a, heading="Corpus2Skill — long-term memory")
-            if text:
-                sections.append(text)
-        except Exception:
-            logger.warning("Corpus2Skill prefetch: Lane A search failed", exc_info=True)
+        text = self._prefetch_lane(
+            lambda timeout: self._client.search(
+                query, limit=_DEFAULT_SEARCH_LIMIT, timeout=timeout
+            ),
+            heading="Corpus2Skill — long-term memory",
+            lane_label="A search",
+            deadline=deadline,
+        )
+        if text:
+            sections.append(text)
 
-        try:
-            lane_b = self._client.journal_recall(
-                sid, query, limit=_DEFAULT_SEARCH_LIMIT, timeout=_PREFETCH_TIMEOUT_SECONDS
-            )
-            text = _format_results(lane_b, heading="Corpus2Skill — recent session journal")
-            if text:
-                sections.append(text)
-        except Exception:
-            logger.warning("Corpus2Skill prefetch: Lane B journal recall failed", exc_info=True)
+        text = self._prefetch_lane(
+            lambda timeout: self._client.journal_recall(
+                sid, query, limit=_DEFAULT_SEARCH_LIMIT, timeout=timeout
+            ),
+            heading="Corpus2Skill — recent session journal",
+            lane_label="B journal recall",
+            deadline=deadline,
+        )
+        if text:
+            sections.append(text)
 
         if not sections:
+            self._probe_health(deadline)
             return ""
+
+        logger.debug(
+            "Corpus2Skill prefetch: returned in %.0f ms",
+            (time.monotonic() - start) * 1000.0,
+        )
         return "<corpus2skill-context>\n" + "\n\n".join(sections) + "\n</corpus2skill-context>"
+
+    def _prefetch_lane(
+        self,
+        call: Any,
+        *,
+        heading: str,
+        lane_label: str,
+        deadline: float,
+    ) -> str:
+        """Run one prefetch lane under the shared deadline; fail-soft.
+
+        ``call(timeout)`` performs the backend request with the given
+        per-attempt timeout. Connection-class failures (see
+        ``_is_retryable_prefetch_error``) get ONE retry within the remaining
+        budget — Modal cold starts surface as exactly those errors, and the
+        retry is the cold-start rescue. Everything else is permanent and
+        returns immediately. Any failure returns "" so a hung or broken
+        backend can never stall the turn (context loss is acceptable).
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ""
+        timeout = min(_PREFETCH_LANE_TIMEOUT_SECONDS, remaining)
+        try:
+            raw = call(timeout)
+        except Exception as exc:
+            if not _is_retryable_prefetch_error(exc):
+                logger.warning(
+                    "Corpus2Skill prefetch: Lane %s failed", lane_label, exc_info=True
+                )
+                return ""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "Corpus2Skill prefetch: Lane %s failed (no retry budget left)",
+                    lane_label,
+                    exc_info=True,
+                )
+                return ""
+            logger.info("Corpus2Skill prefetch: cold-start retry (attempt 2)")
+            try:
+                raw = call(min(_PREFETCH_LANE_TIMEOUT_SECONDS, remaining))
+            except Exception:
+                logger.warning(
+                    "Corpus2Skill prefetch: Lane %s failed", lane_label, exc_info=True
+                )
+                return ""
+        return _format_results(raw, heading=heading)
+
+    def _probe_health(self, deadline: float) -> None:
+        """One budget-bounded GET /health probe after a total prefetch failure.
+
+        Diagnostic aid (grand design §3.3 item 3): distinguishes a Modal
+        cold start (probe succeeds, possibly slowly, or itself times out)
+        from a hard outage. Never pushes prefetch past the deadline.
+        """
+        if self._client is None:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            health = self._client.health(
+                timeout=min(_PREFETCH_HEALTH_TIMEOUT_SECONDS, remaining)
+            )
+            status = health.get("status") if isinstance(health, dict) else health
+            logger.warning(
+                "Corpus2Skill prefetch: backend health probe -> %r "
+                "(all lanes failed; warm/cold diagnostic)",
+                status,
+            )
+        except Exception:
+            logger.warning(
+                "Corpus2Skill prefetch: backend health probe failed "
+                "(backend likely cold or unreachable)",
+                exc_info=True,
+            )
 
     def _ensure_worker(self) -> None:
         with self._worker_lock:

@@ -117,6 +117,13 @@ write `$HERMES_HOME/corpus2skill.json` directly:
 | GET | `/api/search?query=...&limit=...` | A | Classified long-term memory search (prefetch + `corpus2skill_search` tool) |
 | GET | `/api/journal/recall?session_id=...&query=...&limit=...` | B | Session journal recall (prefetch only) |
 | POST | `/api/journal/write` | B | Journal write, body `{session_id, role, content, turn_index}` (`sync_turn` only, never agent-callable) |
+| GET | `/health` | — | Warm/cold diagnostic probe (prefetch only, once after a total prefetch failure) |
+
+`prefetch()` runs under a **total 7.0s deadline** (per-attempt cap 4.0s, one
+retry for connection-class errors such as timeout / 502-504) so a Modal cold
+start can never stall a turn past MemoryManager's 8s external-prefetch
+abandonment window. Explicit tool/journal calls use the 15s default timeout
+instead.
 
 These endpoints are being added to Corpus2Skill in parallel with this
 plugin and may not exist yet at any given point in time; this plugin

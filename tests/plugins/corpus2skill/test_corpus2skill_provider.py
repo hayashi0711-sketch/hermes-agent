@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -43,28 +45,41 @@ def plugin():
 class FakeClient:
     """Stand-in for _Corpus2SkillClient. Records calls, never touches the network."""
 
-    def __init__(self, api_key="", base_url="", timeout=5.0):
+    def __init__(self, api_key="", base_url="", timeout=15.0):
         self.api_key = api_key
         self.base_url = base_url
         self.timeout = timeout
         self.search_calls = []
+        self.search_timeouts = []
         self.recall_calls = []
+        self.recall_timeouts = []
         self.write_calls = []
+        self.health_calls = []
         self.search_response = {"results": []}
         self.recall_response = {"results": []}
+        self.health_response = {"status": "ok"}
         self.search_exc = None
         self.recall_exc = None
         self.write_exc = None
+        self.health_exc = None
         self.write_delay = 0.0
+        self.search_delay = 0.0
+        self.recall_delay = 0.0
 
     def search(self, query, limit=10, *, timeout=None):
+        if self.search_delay:
+            time.sleep(self.search_delay)
         self.search_calls.append((query, limit))
+        self.search_timeouts.append(timeout)
         if self.search_exc:
             raise self.search_exc
         return self.search_response
 
     def journal_recall(self, session_id, query, limit=10, *, timeout=None):
+        if self.recall_delay:
+            time.sleep(self.recall_delay)
         self.recall_calls.append((session_id, query, limit))
+        self.recall_timeouts.append(timeout)
         if self.recall_exc:
             raise self.recall_exc
         return self.recall_response
@@ -76,6 +91,12 @@ class FakeClient:
         if self.write_exc:
             raise self.write_exc
         return {}
+
+    def health(self, *, timeout=None):
+        self.health_calls.append(timeout)
+        if self.health_exc:
+            raise self.health_exc
+        return self.health_response
 
 
 @pytest.fixture
@@ -217,6 +238,111 @@ def test_prefetch_inactive_provider_returns_empty(monkeypatch, plugin, fake_clie
     p.initialize("session-1", hermes_home=str(tmp_path))
     assert p.prefetch("query") == ""
     assert fake_client.search_calls == []
+
+
+# ---------------------------------------------------------------------------
+# prefetch() deadline budget (grand design 2026-09-01 §3.3, T1.2 / D2):
+# total 7.0s deadline, per-attempt cap min(4.0, remaining), ONE retry for
+# connection-class errors only, lanes skipped when remaining <= 0.
+# ---------------------------------------------------------------------------
+
+
+def test_prefetch_retries_connection_class_error_once(provider, fake_client, caplog):
+    """Cold-start rescue: TimeoutError gets exactly one retry within budget."""
+    caplog.set_level(logging.INFO)
+    fake_client.search_exc = TimeoutError("cold start")
+    fake_client.recall_response = {"results": ["lane b ok"]}
+
+    result = provider.prefetch("query")
+
+    assert len(fake_client.search_calls) == 2  # original + 1 retry
+    assert "cold-start retry (attempt 2)" in caplog.text
+    assert "lane b ok" in result
+
+
+def test_prefetch_retries_http_502_once(provider, fake_client, caplog):
+    """HTTP 502/503/504 (Modal cold-start window) also gets one retry."""
+    fake_client.search_exc = urllib.error.HTTPError("url", 502, "bad gateway", None, None)
+    fake_client.recall_response = {"results": ["lane b ok"]}
+
+    result = provider.prefetch("query")
+
+    assert len(fake_client.search_calls) == 2
+    assert "lane b ok" in result
+
+
+def test_prefetch_does_not_retry_permanent_errors(provider, fake_client, caplog):
+    """4xx / malformed-JSON style errors are permanent: no budget wasted."""
+    caplog.set_level(logging.INFO)
+    fake_client.search_exc = ValueError("malformed JSON")
+    fake_client.recall_response = {"results": ["lane b ok"]}
+
+    result = provider.prefetch("query")
+
+    assert len(fake_client.search_calls) == 1
+    assert "cold-start retry" not in caplog.text
+    assert "lane b ok" in result
+
+
+def test_prefetch_skips_lane_b_when_deadline_exhausted(monkeypatch, plugin, provider, fake_client):
+    """remaining <= 0 must skip the lane instead of delaying the turn."""
+    values = iter([100.0, 100.0, 108.0, 108.0])  # deadline = 107.0; Lane B sees remaining < 0
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: next(values))
+    fake_client.search_response = {"results": ["lane a"]}
+    fake_client.recall_response = {"results": ["lane b"]}
+
+    result = provider.prefetch("query")
+
+    assert len(fake_client.search_calls) == 1
+    assert fake_client.recall_calls == []  # budget exhausted -> skipped
+    assert "lane a" in result and "lane b" not in result
+
+
+def test_prefetch_lane_timeouts_capped_at_four_seconds(provider, fake_client):
+    """Each lane attempt is capped at min(4.0, remaining)."""
+    fake_client.search_response = {"results": ["a"]}
+    fake_client.recall_response = {"results": ["b"]}
+
+    provider.prefetch("query")
+
+    assert fake_client.search_timeouts + fake_client.recall_timeouts == [4.0, 4.0]
+
+
+def test_prefetch_completes_under_eight_seconds_with_slow_backend(provider, fake_client):
+    """Grand design acceptance: prefetch() worst case < 8s (7s deadline).
+
+    A slow, cold backend failing with TimeoutError on both lanes (2 attempts
+    each) plus the health probe must still return well inside the 8s window
+    MemoryManager allows before abandoning external prefetch.
+    """
+    fake_client.search_delay = 0.4
+    fake_client.recall_delay = 0.4
+    fake_client.search_exc = TimeoutError("cold start")
+    fake_client.recall_exc = TimeoutError("cold start")
+
+    start = time.monotonic()
+    result = provider.prefetch("query")
+    elapsed = time.monotonic() - start
+
+    assert result == ""
+    assert elapsed < 8.0
+
+
+def test_prefetch_probes_health_when_all_lanes_fail(provider, fake_client):
+    """After a total prefetch failure, one /health probe runs (warm/cold diag)."""
+    fake_client.search_exc = ConnectionError("backend down")
+    fake_client.recall_exc = ConnectionError("backend down")
+
+    assert provider.prefetch("query") == ""
+    assert len(fake_client.health_calls) == 1
+
+
+def test_prefetch_does_not_probe_health_when_a_lane_succeeds(provider, fake_client):
+    fake_client.search_response = {"results": ["lane a ok"]}
+
+    provider.prefetch("query")
+
+    assert fake_client.health_calls == []
 
 
 # ---------------------------------------------------------------------------
