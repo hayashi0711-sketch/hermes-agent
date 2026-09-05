@@ -32,6 +32,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import fastapi
 import modal
 
 from modal_dashboard import bootstrap, token_refresh
@@ -55,6 +56,10 @@ _CORPUS2SKILL_SECRET_NAME = "corpus2skill-secret"
 # (ローカルdaemonは持たない・両者は最初から同じ「単一の脳」を共有する設計。
 # Obsidian Projects/NCAM 05_Current_State.md「2026-08-28」節参照)。
 _NCAM_SECRET_NAME = "ncam-daemon-secret"
+# CF-Hermes-Hub（Cloudflare Durable ObjectsのDiscord Gateway常時接続層）から
+# cf_hub_dispatch()を呼ぶための共有シークレットのみ含む（Obsidian Projects/
+# CF-Hermes-Hub参照）。他のSecretとは無関係の単一用途。
+_CF_HUB_SECRET_NAME = "cf-hub-secret"
 _DASHBOARD_PORT = 8000
 
 app = modal.App("hh-agent-dashboard")
@@ -266,6 +271,61 @@ def run_profile_oneshot(profile: str, prompt: str) -> dict:
     from modal_dashboard.profile_oneshot import run_profile_oneshot_sync
 
     return run_profile_oneshot_sync(profile, prompt, _Path(_DASHBOARD_MOUNT_PATH))
+
+
+@app.function(
+    image=image,
+    volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
+    secrets=[
+        modal.Secret.from_name(_DASHBOARD_SECRET_NAME),
+        modal.Secret.from_name(_NCAM_SECRET_NAME),  # ncam-memory hooks/MCPが実際のエージェント実行中に発火するため
+        modal.Secret.from_name(_CF_HUB_SECRET_NAME),
+    ],
+    timeout=70,  # cf_hub_dispatch.run_root_oneshot_syncの既定タイムアウト(60秒)に余裕を持たせる
+)
+@modal.fastapi_endpoint(method="POST", docs=True)
+def cf_hub_dispatch(payload: dict, request: fastapi.Request) -> dict:
+    """CF-Hermes-Hub（Cloudflare Durable ObjectsでDiscord Gatewayを維持する
+    常時接続層）から、Discordのメンション/DM本文を受け取りHermesの応答を
+    返す。設計はObsidian Projects/CF-Hermes-Hub参照。
+
+    認証は共有シークレット（`CF_HUB_SHARED_SECRET`、Bearerヘッダ）のみの
+    単純な方式。`/api/dispatch/headless`（modal_hub、Agentic OS Hub向け）の
+    ような署名付きトークン発行の仕組みは持たない——呼び出し元がCloudflare
+    Worker 1つに限定されており、値の受け渡しもwrangler secretで閉じている
+    ため、この規模では単純な共有シークレットで十分と判断した（過剰設計を
+    避ける）。
+
+    リクエスト: {"message": str, "channel_id": str, "user_id": str}
+    レスポンス: {"response": str}
+    """
+    import os
+
+    from fastapi import HTTPException
+
+    expected = os.environ.get("CF_HUB_SHARED_SECRET", "")
+    auth_header = request.headers.get("authorization", "")
+    provided = auth_header[len("Bearer ") :] if auth_header.startswith("Bearer ") else ""
+    # 空文字同士の一致で通ってしまわないようにする（Secret未設定時のfail-closed）。
+    if not expected or not provided or provided != expected:
+        raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+
+    message = payload.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(status_code=400, detail="message must be a non-empty string")
+
+    from pathlib import Path as _Path
+
+    from modal_dashboard.cf_hub_dispatch import run_root_oneshot_sync
+
+    try:
+        result = run_root_oneshot_sync(message, _Path(_DASHBOARD_MOUNT_PATH))
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"response": result["response"]}
 
 
 def _ensure_agent_token_seeded(hermes_home: Path) -> None:
