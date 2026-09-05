@@ -36,14 +36,13 @@ _NCAM_REPO_ROOT = _REPO_ROOT.parent / "NCAM"
 
 image = (
     modal.Image.from_dockerfile(_DASHBOARD_DOCKERFILE_PATH, context_dir=_REPO_ROOT)
-    .pip_install(
-        "duckdb==1.5.5",
-        "pytz==2026.3.post1",
-        "numpy==2.4.3",
-        "mcp==2.0.0",
-        "fastapi==0.133.1",
-        "uvicorn[standard]==0.41.0",
-        "pydantic==2.13.4",
+    # Image.pip_install()はこのイメージのvenv(pip自体を含まない)では失敗する
+    # ("No module named pip", 2026-09-05実機確認)。modal_dashboard/app.pyの
+    # 同名コメント参照 -- uv pip installを使う。
+    .run_commands(
+        "uv pip install "
+        "duckdb==1.5.5 pytz==2026.3.post1 numpy==2.4.3 mcp==2.0.0 "
+        "fastapi==0.133.1 'uvicorn[standard]==0.41.0' pydantic==2.13.4"
     )
     .add_local_dir(str(_NCAM_REPO_ROOT / "ncam"), remote_path="/opt/ncam-pkg/ncam", copy=True)
     .add_local_dir(str(_NCAM_REPO_ROOT / "ncam_hooks"), remote_path="/opt/ncam-pkg/ncam_hooks", copy=True)

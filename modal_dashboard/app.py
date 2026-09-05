@@ -82,14 +82,15 @@ image = (
     # anthropicは`--extra anthropic`で既にanthropic==0.87.0が入っているため
     # ここでは追加しない。duckdb/pytzはNCAM固有でhermes-agent側に既存pinが
     # 無いため、NCAM自身の.venvで動作確認済みの版に固定する。
-    .pip_install(
-        "duckdb==1.5.5",
-        "pytz==2026.3.post1",
-        "numpy==2.4.3",
-        "mcp==2.0.0",
-        "fastapi==0.133.1",
-        "uvicorn[standard]==0.41.0",
-        "pydantic==2.13.4",
+    # Image.pip_install()はこのイメージのvenv(uv syncで作られ、pip自体を
+    # 含まない)へ`python -m pip`で実行しようとして失敗する(2026-09-05実機で
+    # 確認: "No module named pip")。DockerfileのRUN uv syncと同じ`uv pip
+    # install`を使う(WORKDIR /opt/hermesがuv syncと同じく永続しているため
+    # VIRTUAL_ENV等を明示しなくても.venvが自動検出される)。
+    .run_commands(
+        "uv pip install "
+        "duckdb==1.5.5 pytz==2026.3.post1 numpy==2.4.3 mcp==2.0.0 "
+        "fastapi==0.133.1 'uvicorn[standard]==0.41.0' pydantic==2.13.4"
     )
     # ncam_hooks/ は標準ライブラリのみで完結(json/os/sys/typing)。ncam/ 本体は
     # 上のpip_installした依存だけで動く(mcp_server.pyがncam.daemon.launcherを
