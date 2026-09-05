@@ -49,14 +49,58 @@ _HUB_SECRET_NAME = "hh-agent-secret"  # ONLY attached to refresh_dashboard_agent
 # cannot be read back to safely recreate it with one more key added. A
 # separate Secret is purely additive and never touches the existing one.
 _CORPUS2SKILL_SECRET_NAME = "corpus2skill-secret"
+# NCAM連携用(2026-09-05新規)。ncam-serve.modal.run(既存の常設NCAM daemon)へ
+# リモート接続するための認証情報のみ含む。PC版Hermesも同じdaemonへ
+# NCAM_DAEMON_URL/NCAM_DAEMON_TOKENという同名のOS環境変数経由で接続している
+# (ローカルdaemonは持たない・両者は最初から同じ「単一の脳」を共有する設計。
+# Obsidian Projects/NCAM 05_Current_State.md「2026-08-28」節参照)。
+_NCAM_SECRET_NAME = "ncam-daemon-secret"
 _DASHBOARD_PORT = 8000
 
 app = modal.App("hh-agent-dashboard")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCKERFILE_PATH = Path(__file__).resolve().parent / "Dockerfile"
+# NCAMは別リポジトリ(Hermes-Hyper-Agent_HHAgentの兄弟ディレクトリ)。このビルドは
+# これまで一貫してこのマシン(Projects/配下にNCAMをcloneしたHaruki氏のPC)から
+# しか実行されていないため、機械依存の絶対パスではなく兄弟ディレクトリの相対
+# 関係として表す。存在確認は行わない(Codexレビュー指摘: モジュールimport時に
+# 即FileNotFoundErrorにすると、../NCAMを持たないクリーンチェックアウト/CIで
+# modal_dashboard/tests/test_app.py・modal_hub/tests/test_gateway_app.pyの
+# importそのものが壊れる。`add_local_dir`はビルド/デプロイ時まで遅延評価される
+# ため、本当に存在しない場合はそのタイミングでModal自身が明確なエラーを出す)。
+_NCAM_REPO_ROOT = _REPO_ROOT.parent / "NCAM"
 
-image = modal.Image.from_dockerfile(_DOCKERFILE_PATH, context_dir=_REPO_ROOT)
+image = (
+    modal.Image.from_dockerfile(_DOCKERFILE_PATH, context_dir=_REPO_ROOT)
+    # ncam.interfaces.mcp_server の基本依存のみ(NCAM_DAEMON_URL/TOKEN設定時は
+    # ローカルdaemonをspawnしないため、pyproject.tomlのoptional-dependencies
+    # [embed]/[accel]/[llm](fastembed・onnxruntime・numba等の重い依存)は不要)。
+    # バージョンは可能な限りhermes-agent自身のpyproject.tomlの既存exact pinと
+    # 一致させ(pydantic/fastapi/uvicorn/mcp/numpy)、依存解決の衝突を避ける
+    # (Dependency Pinning Policy: 上限なしの`>=`はレビュー対象、AGENTS.md参照)。
+    # anthropicは`--extra anthropic`で既にanthropic==0.87.0が入っているため
+    # ここでは追加しない。duckdb/pytzはNCAM固有でhermes-agent側に既存pinが
+    # 無いため、NCAM自身の.venvで動作確認済みの版に固定する。
+    .pip_install(
+        "duckdb==1.5.5",
+        "pytz==2026.3.post1",
+        "numpy==2.4.3",
+        "mcp==2.0.0",
+        "fastapi==0.133.1",
+        "uvicorn[standard]==0.41.0",
+        "pydantic==2.13.4",
+    )
+    # ncam_hooks/ は標準ライブラリのみで完結(json/os/sys/typing)。ncam/ 本体は
+    # 上のpip_installした依存だけで動く(mcp_server.pyがncam.daemon.launcherを
+    # importするが、実際にdaemonをspawnするのはNCAM_DAEMON_URL/TOKEN未設定時
+    # のみ)。pyproject.tomlごとコピーしてeditable installする代わりに、
+    # パッケージ本体だけをPYTHONPATH配下へ置く(services/・tests/・.venv/等の
+    # Modal daemon自体のデプロイ物一式は不要なので持ち込まない)。
+    .add_local_dir(str(_NCAM_REPO_ROOT / "ncam"), remote_path="/opt/ncam-pkg/ncam", copy=True)
+    .add_local_dir(str(_NCAM_REPO_ROOT / "ncam_hooks"), remote_path="/opt/ncam-pkg/ncam_hooks", copy=True)
+    .env({"PYTHONPATH": "/opt/ncam-pkg"})
+)
 
 
 @app.function(
@@ -98,6 +142,13 @@ def refresh_dashboard_agent_token():
         # 既に使っている corpus2skill-secret をそのまま流用する（S-04:
         # 読み取りは既存 Bearer。新たな秘密を作らない）。
         modal.Secret.from_name(_CORPUS2SKILL_SECRET_NAME),
+        # 機能的には不要（sync_dashboard_skillsはhooks/MCPを起動しない固定
+        # コードのみ実行する）だが、既存テスト
+        # test_sync_dashboard_skills_diff_vs_dashboard_server が
+        # 「syncはdashboard_serverの秘密を包含する」という不変条件を検証して
+        # いるため、dashboard_server側に追加したncam-daemon-secretもここへ
+        # 揃える。
+        modal.Secret.from_name(_NCAM_SECRET_NAME),
     ],
     max_containers=1,
     schedule=modal.Period(hours=8),   # refresh_dashboard_agent_token と同じ周期
@@ -197,7 +248,10 @@ def sync_dashboard_skills():
 @app.function(
     image=image,
     volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
-    secrets=[modal.Secret.from_name(_DASHBOARD_SECRET_NAME)],
+    secrets=[
+        modal.Secret.from_name(_DASHBOARD_SECRET_NAME),
+        modal.Secret.from_name(_NCAM_SECRET_NAME),  # ncam-memory hooks/MCPが実際のエージェント実行中に発火するため
+    ],
     timeout=310,  # profile_oneshot.py 側の既定タイムアウト(300秒)に余裕を持たせる
 )
 def run_profile_oneshot(profile: str, prompt: str) -> dict:
@@ -235,6 +289,7 @@ def _ensure_agent_token_seeded(hermes_home: Path) -> None:
     secrets=[
         modal.Secret.from_name(_DASHBOARD_SECRET_NAME),  # NOT hh-agent-secret -- see module docstring, C-3
         modal.Secret.from_name(_CORPUS2SKILL_SECRET_NAME),  # CORPUS2SKILL_API_KEY only, see comment above
+        modal.Secret.from_name(_NCAM_SECRET_NAME),  # ncam-memory hooks/MCP、config.yaml側の登録とセットで有効化
     ],
     min_containers=0,       # scale-to-zero -- cost floor is $0 (docs/hh-agent/08_Phase1c_Spec.md §2.2)
     max_containers=1,       # required -- see Global Constraints

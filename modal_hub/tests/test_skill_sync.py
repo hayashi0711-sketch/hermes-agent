@@ -811,6 +811,7 @@ _APP_CONSTS = {
     "_DASHBOARD_SECRET_NAME": "hh-agent-dashboard-secret",
     "_HUB_SECRET_NAME": "hh-agent-secret",
     "_CORPUS2SKILL_SECRET_NAME": "corpus2skill-secret",
+    "_NCAM_SECRET_NAME": "ncam-daemon-secret",
     "_DASHBOARD_PORT": 8000,
 }
 
@@ -903,7 +904,11 @@ def test_sync_dashboard_skills_volumes_secrets_and_schedule():
 
     - volumes: _DASHBOARD_MOUNT_PATH（dashboard Volume）に加えて
       Hub Volume（hh-agent-store）をマウントする
-    - secrets: dashboard / hh-agent-secret / corpus2skill の 3 つ
+    - secrets: dashboard / hh-agent-secret / corpus2skill / ncam-daemon の 4 つ
+      (ncam-daemon-secretは2026-09-05追加。sync_dashboard_skills自体は
+      hooks/MCPを起動しないため機能的には不要だが、
+      test_sync_dashboard_skills_diff_vs_dashboard_serverが検証する
+      「syncはdashboard_serverの秘密を包含する」不変条件を満たすために揃える)
     - max_containers=1・schedule=modal.Period(hours=8)
     """
     cfg = _function_kwargs(_app_ast(), "sync_dashboard_skills")
@@ -915,6 +920,7 @@ def test_sync_dashboard_skills_volumes_secrets_and_schedule():
         "hh-agent-dashboard-secret",
         "hh-agent-secret",
         "corpus2skill-secret",
+        "ncam-daemon-secret",
     ]
     assert cfg["max_containers"] == 1
     assert cfg["schedule"] == {"period": {"hours": 8}}

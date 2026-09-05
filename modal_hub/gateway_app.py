@@ -22,13 +22,33 @@ from hermes_cli.telegram_managed_bot import TelegramBotSetupResult, auto_setup_t
 _DASHBOARD_VOLUME_NAME = "hh-agent-dashboard-home"
 _DASHBOARD_MOUNT_PATH = "/opt/data"
 _HUB_SECRET_NAME = "hh-agent-secret"
+# NCAM連携用(2026-09-05新規)。modal_dashboard/app.pyの同名定数・同じコメント参照。
+_NCAM_SECRET_NAME = "ncam-daemon-secret"
 
 app = modal.App("hh-agent-gateway")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DASHBOARD_DOCKERFILE_PATH = Path(__file__).resolve().parent.parent / "modal_dashboard" / "Dockerfile"
+# NCAMパス解決・バージョンpinの方針はmodal_dashboard/app.pyの同名定数・コメント参照
+# (存在確認を import 時に行わない理由も同様: add_local_dir は遅延評価されるため
+# ../NCAM を持たない環境でのテストimportを壊さない)。
+_NCAM_REPO_ROOT = _REPO_ROOT.parent / "NCAM"
 
-image = modal.Image.from_dockerfile(_DASHBOARD_DOCKERFILE_PATH, context_dir=_REPO_ROOT)
+image = (
+    modal.Image.from_dockerfile(_DASHBOARD_DOCKERFILE_PATH, context_dir=_REPO_ROOT)
+    .pip_install(
+        "duckdb==1.5.5",
+        "pytz==2026.3.post1",
+        "numpy==2.4.3",
+        "mcp==2.0.0",
+        "fastapi==0.133.1",
+        "uvicorn[standard]==0.41.0",
+        "pydantic==2.13.4",
+    )
+    .add_local_dir(str(_NCAM_REPO_ROOT / "ncam"), remote_path="/opt/ncam-pkg/ncam", copy=True)
+    .add_local_dir(str(_NCAM_REPO_ROOT / "ncam_hooks"), remote_path="/opt/ncam-pkg/ncam_hooks", copy=True)
+    .env({"PYTHONPATH": "/opt/ncam-pkg"})
+)
 
 
 async def run_telegram_gateway_forever() -> None:
@@ -44,7 +64,10 @@ async def run_telegram_gateway_forever() -> None:
 @app.function(
     image=image,
     volumes={_DASHBOARD_MOUNT_PATH: modal.Volume.from_name(_DASHBOARD_VOLUME_NAME, create_if_missing=True)},
-    secrets=[modal.Secret.from_name(_HUB_SECRET_NAME)],
+    secrets=[
+        modal.Secret.from_name(_HUB_SECRET_NAME),
+        modal.Secret.from_name(_NCAM_SECRET_NAME),  # ncam-memory hooks/MCPが実際のBot応答生成中に発火するため
+    ],
     min_containers=1,
     timeout=86400,
 )
