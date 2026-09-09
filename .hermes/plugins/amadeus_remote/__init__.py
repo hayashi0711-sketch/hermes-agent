@@ -203,6 +203,21 @@ def _is_retryable_prefetch_error(exc: BaseException) -> bool:
     return isinstance(exc, (urllib.error.URLError, TimeoutError))
 
 
+def _remaining(deadline: float) -> float:
+    """Seconds until deadline (a time.monotonic()-based absolute time)."""
+    return deadline - time.monotonic()
+
+
+def _log_prefetch_query_failed() -> None:
+    """Log a failed prefetch /api/query attempt.
+
+    Shared by the first failure and the post-retry failure in
+    _prefetch_query — both warn with the same message; exc_info captures
+    whichever exception is active at the call site.
+    """
+    logger.warning("AmadeusRemote prefetch: /api/query failed", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Response shape helpers
 #
@@ -364,6 +379,23 @@ class _AmadeusRemoteClient:
             timeout=timeout,
         )
 
+    def _write_payload(self, write_type: str, session_id: str, role: str,
+                       content: str, **extra) -> dict:
+        """Common /api/write payload fields (write_type/content/apply/
+        session_id/role), merged with the write_type-specific extras
+        (**extra). Shared by journal_write/episode_write — apply=True is
+        both methods' intended design and must not change.
+        """
+        payload = {
+            "write_type": write_type,
+            "content": content,
+            "apply": True,
+            "session_id": session_id,
+            "role": role,
+        }
+        payload.update(extra)
+        return payload
+
     def journal_write(self, session_id: str, role: str, content: str, turn_index: int) -> dict:
         """Per-turn journal entry: POST /api/write (write_type=journal).
 
@@ -373,14 +405,9 @@ class _AmadeusRemoteClient:
         """
         return self._request(
             "POST", "/api/write",
-            payload={
-                "write_type": "journal",
-                "content": content,
-                "apply": True,
-                "session_id": session_id,
-                "role": role,
-                "turn_index": turn_index,
-            },
+            payload=self._write_payload(
+                "journal", session_id, role, content, turn_index=turn_index
+            ),
         )
 
     def episode_write(self, session_id: str, role: str, content: str,
@@ -392,15 +419,10 @@ class _AmadeusRemoteClient:
         """
         return self._request(
             "POST", "/api/write",
-            payload={
-                "write_type": "episode",
-                "content": content,
-                "apply": True,
-                "session_id": session_id,
-                "role": role,
-                "subject": subject,
-                "namespace": namespace,
-            },
+            payload=self._write_payload(
+                "episode", session_id, role, content,
+                subject=subject, namespace=namespace,
+            ),
         )
 
 
@@ -462,6 +484,13 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
     def name(self) -> str:
         return "amadeus_remote"
 
+    @property
+    def _ready(self) -> bool:
+        """Active and client configured — the guard condition shared by
+        prefetch()/sync_turn()/on_session_end()/handle_tool_call().
+        """
+        return self._active and self._client is not None
+
     # -- Core lifecycle -------------------------------------------------
 
     def is_available(self) -> bool:
@@ -509,7 +538,7 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not self._active or self._client is None or not query or not query.strip():
+        if not self._ready or not query or not query.strip():
             return ""
         # Single call under a TOTAL 7.0s deadline (MemoryManager abandons
         # external prefetch after 8s). /api/query fans out across NCAM and
@@ -550,7 +579,7 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
         client = self._client
         if client is None:
             return "", False
-        remaining = deadline - time.monotonic()
+        remaining = _remaining(deadline)
         if remaining <= 0:
             return "", False
 
@@ -567,12 +596,10 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
             raw = _attempt(timeout)
         except Exception as exc:
             if not _is_retryable_prefetch_error(exc):
-                logger.warning(
-                    "AmadeusRemote prefetch: /api/query failed", exc_info=True
-                )
+                _log_prefetch_query_failed()
                 return "", False
 
-            remaining = deadline - time.monotonic()
+            remaining = _remaining(deadline)
             if remaining <= 0:
                 logger.warning(
                     "AmadeusRemote prefetch: /api/query failed (no retry budget left)",
@@ -583,9 +610,7 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
             try:
                 raw = _attempt(min(_PREFETCH_ATTEMPT_TIMEOUT_SECONDS, remaining))
             except Exception:
-                logger.warning(
-                    "AmadeusRemote prefetch: /api/query failed", exc_info=True
-                )
+                _log_prefetch_query_failed()
                 return "", False
         return _render_evidence(raw), True
 
@@ -599,7 +624,7 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
         """
         if self._client is None:
             return
-        remaining = deadline - time.monotonic()
+        remaining = _remaining(deadline)
         if remaining <= 0:
             return
         try:
@@ -660,7 +685,7 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
         # A single persistent worker (see _worker_loop) drains the queue
         # FIFO, so writes for this turn are strictly ordered relative to
         # every other turn regardless of backend latency.
-        if not self._active or self._client is None:
+        if not self._ready:
             return
 
         sid = session_id or self._session_id
@@ -685,7 +710,7 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
         # Not required to be non-blocking (not under the threading
         # contract), but must never raise: failures are logged and the
         # session boundary is simply not recorded.
-        if not self._active or self._client is None:
+        if not self._ready:
             return
         sid = self._session_id
         if not sid:  # no session context -> nothing to attribute the record to
@@ -721,17 +746,18 @@ class AmadeusRemoteMemoryProvider(MemoryProvider):
         return [AMADEUS_QUERY_TOOL_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        args = args or {}
         if tool_name != "amadeus_query":
             return _tool_error(f"Unknown tool: {tool_name}")
-        if not self._active or self._client is None:
+        if not self._ready:
             return _tool_error("AmadeuS-Remote is not configured")
 
-        query = str((args or {}).get("query") or "").strip()
+        query = str(args.get("query") or "").strip()
         if not query:
             return _tool_error("query is required")
-        project = str((args or {}).get("project") or "").strip() or None
+        project = str(args.get("project") or "").strip() or None
         try:
-            limit = max(1, min(50, int((args or {}).get("limit", _DEFAULT_TOOL_LIMIT) or _DEFAULT_TOOL_LIMIT)))
+            limit = max(1, min(50, int(args.get("limit", _DEFAULT_TOOL_LIMIT) or _DEFAULT_TOOL_LIMIT)))
         except Exception:
             limit = _DEFAULT_TOOL_LIMIT
 
