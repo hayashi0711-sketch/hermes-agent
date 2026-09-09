@@ -48,6 +48,12 @@
 #     ワークが自動的に呼ぶものでありツール呼び出しとしては現れないため対象外
 #     （BUG-5と混同しないこと）。journal_write等の書き込み系ツールはこのファイル
 #     に一切追加しない（get_tool_schemasにも含まれず公開されない）。
+#   - Phase5b（2026-09-09、AmadeuS-Remote Memory Provider プラグイン、M-07 と
+#     同一規則）: amadeus_remote プラグインが get_tool_schemas() で公開する唯一の
+#     エージェント呼び出し可能ツール `amadeus_query`（統合メモリゲートウェイへの
+#     読み取り専用クエリ。サーバー側でNCAM+Corpus2Skillへルーティング）を
+#     read カテゴリへ追加。書き込み系ツール（journal/episode等）は公開されず
+#     このファイルにも一切追加しない。
 #
 # modal_hub/core/risk.py が読み込む契約:
 #   - version: スキーマバージョン（未使用でも将来の互換性チェック用に必須）
@@ -69,7 +75,7 @@ tool_aliases:
   write:    [Write, write_file, create_file]
   edit:     [Edit, MultiEdit, str_replace_editor, edit_file]
   notebook: [NotebookEdit]
-  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search, skills_list, skill_view, corpus2skill_search]
+  read:     [Read, read_file, view, Glob, Grep, LS, list_dir, codebase_search, skills_list, skill_view, corpus2skill_search, amadeus_query]
 
 # 読み取り専用として素通りさせるカテゴリ。ここに無いものは副作用ありとみなす。
 read_only_categories: [read]

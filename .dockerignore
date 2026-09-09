@@ -13,13 +13,14 @@
 
 # Hermes runtime state that may exist in-repo during local development
 # (session DBs, config.yaml, caches, other project-local plugins). Only the
-# Corpus2Skill Memory Provider plugin should ever ship in the image -- see
-# docs/hh-agent/03_Architecture.md §13 M-05 and the equivalent .gitignore
-# exception (Codex review 2026-08-15, High finding).
+# Corpus2Skill and AmadeuS-Remote Memory Provider plugins should ever ship
+# in the image -- see docs/hh-agent/03_Architecture.md §13 M-05 and the
+# equivalent .gitignore exception (Codex review 2026-08-15, High finding).
 .hermes/*
 !.hermes/plugins/
 .hermes/plugins/*
 !.hermes/plugins/corpus2skill/
+!.hermes/plugins/amadeus_remote/
 
 # Python
 __pycache__

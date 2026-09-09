@@ -50,6 +50,13 @@ _HUB_SECRET_NAME = "hh-agent-secret"  # ONLY attached to refresh_dashboard_agent
 # cannot be read back to safely recreate it with one more key added. A
 # separate Secret is purely additive and never touches the existing one.
 _CORPUS2SKILL_SECRET_NAME = "corpus2skill-secret"
+# AmadeuS-Remote連携用(2026-09-09新規・Phase5b)。Modal版HermesをAmadeuS
+# (NCAM+Corpus2Skillへルーティングする統一メモリゲートウェイ)へ繋ぐ
+# amadeus_remoteメモリプロバイダプラグインが使う認証情報のみ含む
+# (AMADEUS_REMOTE_API_KEY、Bearerトークン)。上記corpus2skill-secretと同じ
+# 分離Secret設計 — 既存Secretには触れない(secret create --force は全キー
+# 差し替えのため)。
+_AMADEUS_REMOTE_SECRET_NAME = "amadeus-remote-secret"
 # NCAM連携用(2026-09-05新規)。ncam-serve.modal.run(既存の常設NCAM daemon)へ
 # リモート接続するための認証情報のみ含む。PC版Hermesも同じdaemonへ
 # NCAM_DAEMON_URL/NCAM_DAEMON_TOKENという同名のOS環境変数経由で接続している
@@ -148,6 +155,11 @@ def refresh_dashboard_agent_token():
         # 既に使っている corpus2skill-secret をそのまま流用する（S-04:
         # 読み取りは既存 Bearer。新たな秘密を作らない）。
         modal.Secret.from_name(_CORPUS2SKILL_SECRET_NAME),
+        # amadeus-remote-secret(AMADEUS_REMOTE_API_KEY)もdashboard_serverの
+        # amadeus_remoteプラグインが使うため、下記ncam-daemon-secretと同じ理由
+        # （「syncはdashboard_serverの秘密を包含する」不変条件
+        # test_sync_dashboard_skills_diff_vs_dashboard_server）でここにも揃える。
+        modal.Secret.from_name(_AMADEUS_REMOTE_SECRET_NAME),
         # 機能的には不要（sync_dashboard_skillsはhooks/MCPを起動しない固定
         # コードのみ実行する）だが、既存テスト
         # test_sync_dashboard_skills_diff_vs_dashboard_server が
@@ -350,6 +362,7 @@ def _ensure_agent_token_seeded(hermes_home: Path) -> None:
     secrets=[
         modal.Secret.from_name(_DASHBOARD_SECRET_NAME),  # NOT hh-agent-secret -- see module docstring, C-3
         modal.Secret.from_name(_CORPUS2SKILL_SECRET_NAME),  # CORPUS2SKILL_API_KEY only, see comment above
+        modal.Secret.from_name(_AMADEUS_REMOTE_SECRET_NAME),  # AMADEUS_REMOTE_API_KEY only (amadeus_remote provider, Phase 5b)
         modal.Secret.from_name(_NCAM_SECRET_NAME),  # ncam-memory hooks/MCP、config.yaml側の登録とセットで有効化
     ],
     min_containers=0,       # scale-to-zero -- cost floor is $0 (docs/hh-agent/08_Phase1c_Spec.md §2.2)

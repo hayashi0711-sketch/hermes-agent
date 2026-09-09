@@ -1,0 +1,15 @@
+name: amadeus_remote
+version: 0.1.0
+description: >-
+  Bridges the Modal-hosted Hermes (hh-agent-dashboard) onto AmadeuS, the
+  unified memory gateway that routes every recall across NCAM and
+  Corpus2Skill, by calling the already-deployed AmadeuS-Remote Modal
+  service over plain HTTPS REST (no MCP client). Complement to the
+  corpus2skill plugin (which stays in place); the memory.provider switch
+  is a separate task. Read-only tool surface: only amadeus_query is
+  exposed to the agent.
+hooks:
+  - system_prompt_block
+  - prefetch
+  - sync_turn
+  - on_session_end
